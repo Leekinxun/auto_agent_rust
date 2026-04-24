@@ -1,0 +1,45 @@
+# ============================================================
+# Claude Agent API - 主配置文件
+# ============================================================
+
+# ---------- Agent / LLM（vllm openai 兼容接口）----------
+agent:
+  model_id: "minimax-m2.5"   # vllm 上部署的模型名
+  max_tokens: 50000
+  base_url: "http://10.100.3.22:9800/v1"  # vllm openai 兼容地址
+  api_key: "EMPTY"                      # vllm 不需要真实 key
+
+# ---------- FastAPI 服务 ----------
+server:
+  host: "0.0.0.0"
+  port: 18000
+  reload: false
+  cors:
+    allow_origins:
+      - "*"
+    allow_credentials: false
+    allow_methods:
+      - "*"
+    allow_headers:
+      - "*"
+
+# ---------- MCP 工具服务（nb_mcp）----------
+mcp:
+  base_url: "http://10.100.3.22:8444/mcp"  # FastMCP 端点
+  timeout: 60
+  connect_timeout: 10
+
+# ---------- 文件记忆 ----------
+memory:
+  file_memory:
+    base_dir: ".user_memories"   # 相对路径时以当前工作目录为根
+    user_max_chars: 1375
+    memory_max_chars: 2200
+    restructure_ratio: 0.5       # 文件内容达到上限的 50% 时，下一轮更新触发更激进的重构压缩
+    update_max_tokens: 1800
+
+# ---------- Skills ----------
+skills:
+  learning:
+    enabled: true
+    update_max_tokens: 2200
