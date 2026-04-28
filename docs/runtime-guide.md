@@ -156,10 +156,13 @@ docker compose up -d --build
 如果不用 Compose，可手动挂载：
 
 ```bash
-docker build -t auto-claude-code-rust-react .
+cp .env.example .env
+docker build -t auto-claude-code-rust-react:latest .
 
 docker run -d \
   --name auto-claude-code-rust-react \
+  --restart unless-stopped \
+  --env-file .env \
   -p 18000:18000 \
   -v "$(pwd)/config:/app/config:ro" \
   -v "$(pwd)/skills:/app/skills" \
@@ -170,8 +173,10 @@ docker run -d \
   -v "$(pwd)/.worktrees:/app/.worktrees" \
   -v "$(pwd)/.sessions:/app/.sessions" \
   -v "$(pwd)/.transcripts:/app/.transcripts" \
-  auto-claude-code-rust-react
+  auto-claude-code-rust-react:latest
 ```
+
+上面的示例按默认端口 `18000` 启动；如果你修改了 `.env` 里的 `SERVER_PORT`，记得同步调整 `-p <宿主机端口>:<容器端口>`。
 
 ## 7. Worktree 能力注意事项
 

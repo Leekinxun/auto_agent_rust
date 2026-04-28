@@ -34,12 +34,39 @@ cargo run
 
 ## Docker 启动
 
+推荐优先使用 Compose：
+
 ```bash
 cp .env.example .env
 docker compose up -d --build
 ```
 
 默认通过 `http://localhost:18000` 访问。
+
+如果不用 Compose，也可以直接使用 `docker run`：
+
+```bash
+cp .env.example .env
+docker build -t auto-claude-code-rust-react:latest .
+
+docker run -d \
+  --name auto-claude-code-rust-react \
+  --restart unless-stopped \
+  --env-file .env \
+  -p 18000:18000 \
+  -v "$(pwd)/config:/app/config:ro" \
+  -v "$(pwd)/skills:/app/skills" \
+  -v "$(pwd)/.user_memories:/app/.user_memories" \
+  -v "$(pwd)/uploads:/app/uploads" \
+  -v "$(pwd)/outputs:/app/outputs" \
+  -v "$(pwd)/.tasks:/app/.tasks" \
+  -v "$(pwd)/.worktrees:/app/.worktrees" \
+  -v "$(pwd)/.sessions:/app/.sessions" \
+  -v "$(pwd)/.transcripts:/app/.transcripts" \
+  auto-claude-code-rust-react:latest
+```
+
+上面的示例按默认端口 `18000` 启动；如果你修改了 `.env` 里的 `SERVER_PORT`，记得同步调整 `-p <宿主机端口>:<容器端口>`。
 
 更完整的配置来源、环境变量覆盖、持久化目录与部署注意事项，见 [`docs/runtime-guide.md`](docs/runtime-guide.md)。
 
