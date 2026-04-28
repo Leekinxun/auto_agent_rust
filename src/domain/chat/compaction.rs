@@ -8,7 +8,6 @@ use crate::config::model::AppConfig;
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{ChatCompletionRequest, ChatMessage};
 
-pub const TOKEN_THRESHOLD: usize = 60_000;
 const AUTO_COMPACT_INPUT_CHARS: usize = 80_000;
 const AUTO_COMPACT_MAX_TOKENS: u32 = 2_000;
 

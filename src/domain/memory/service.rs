@@ -67,6 +67,7 @@ impl UserMemoryService {
         llm_client: &LlmClient,
         model: &str,
         max_tokens: u32,
+        max_iterations: usize,
         user_id: Option<&str>,
         user_message: &str,
         assistant_reply: &str,
@@ -145,7 +146,7 @@ When you are done, respond with a brief summary such as 'updated USER.md', 'upda
         let mut read_state = HashSet::new();
         let tools = memory_update_tools();
 
-        for _ in 0..8 {
+        for _ in 0..max_iterations {
             let response = llm_client
                 .chat(&ChatCompletionRequest {
                     model: model.to_string(),

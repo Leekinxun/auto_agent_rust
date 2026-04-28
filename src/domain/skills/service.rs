@@ -59,6 +59,7 @@ impl SkillService {
         llm_client: &LlmClient,
         model: &str,
         max_tokens: u32,
+        max_iterations: usize,
         user_id: Option<&str>,
         usages: &[SkillUsage],
         user_message: &str,
@@ -94,6 +95,7 @@ impl SkillService {
                     llm_client,
                     model,
                     max_tokens,
+                    max_iterations,
                     user_id,
                     &usage,
                     user_message,
@@ -146,6 +148,7 @@ impl SkillService {
         llm_client: &LlmClient,
         model: &str,
         max_tokens: u32,
+        max_iterations: usize,
         user_id: &str,
         usage: &SkillUsage,
         user_message: &str,
@@ -163,6 +166,7 @@ impl SkillService {
                 llm_client,
                 model,
                 max_tokens,
+                max_iterations,
                 user_id,
                 &usage.name,
                 usage.scope,
@@ -183,6 +187,7 @@ impl SkillService {
         llm_client: &LlmClient,
         model: &str,
         max_tokens: u32,
+        max_iterations: usize,
         user_id: &str,
         skill_name: &str,
         source_scope: SkillScope,
@@ -228,7 +233,7 @@ When you are done, respond briefly with 'updated skill' or 'no changes'.",
         let mut read_state = HashSet::new();
         let tools = private_skill_update_tools();
 
-        for _ in 0..8 {
+        for _ in 0..max_iterations {
             let response = llm_client
                 .chat(&ChatCompletionRequest {
                     model: model.to_string(),

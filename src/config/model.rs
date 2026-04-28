@@ -33,6 +33,9 @@ pub struct AgentConfig {
     pub api_key: String,
     pub temperature: Option<f32>,
     pub top_p: Option<f32>,
+    pub max_iterations: usize,
+    pub subagent_max_iterations: usize,
+    pub auto_compact_token_threshold: usize,
 }
 
 impl Default for AgentConfig {
@@ -44,6 +47,9 @@ impl Default for AgentConfig {
             api_key: "EMPTY".to_string(),
             temperature: None,
             top_p: None,
+            max_iterations: 8,
+            subagent_max_iterations: 30,
+            auto_compact_token_threshold: 60_000,
         }
     }
 }

@@ -8,6 +8,9 @@ agent:
   max_tokens: 50000
   base_url: "http://10.100.3.22:9800/v1"  # vllm openai 兼容地址
   api_key: "EMPTY"                      # vllm 不需要真实 key
+  max_iterations: 8
+  subagent_max_iterations: 30
+  auto_compact_token_threshold: 60000
 
 # ---------- FastAPI 服务 ----------
 server:

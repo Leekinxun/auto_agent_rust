@@ -78,6 +78,17 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_TOP_P"]) {
         config.agent.top_p = Some(parse_top_p("AGENT_TOP_P", &value)?);
     }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_MAX_ITERATIONS"]) {
+        config.agent.max_iterations = parse_positive_usize("AGENT_MAX_ITERATIONS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_SUBAGENT_MAX_ITERATIONS"]) {
+        config.agent.subagent_max_iterations =
+            parse_positive_usize("AGENT_SUBAGENT_MAX_ITERATIONS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_AUTO_COMPACT_TOKEN_THRESHOLD"]) {
+        config.agent.auto_compact_token_threshold =
+            parse_positive_usize("AGENT_AUTO_COMPACT_TOKEN_THRESHOLD", &value)?;
+    }
     if let Some(value) = first_non_empty_env(get_env, &["SERVER_HOST"]) {
         config.server.host = value;
     }
@@ -155,6 +166,12 @@ fn parse_positive_u64(key: &str, raw: &str) -> Result<u64> {
     Ok(value)
 }
 
+fn parse_positive_usize(key: &str, raw: &str) -> Result<usize> {
+    let value = parse_env::<usize>(key, raw)?;
+    ensure!(value > 0, "{key} must be greater than 0");
+    Ok(value)
+}
+
 fn parse_temperature(key: &str, raw: &str) -> Result<f32> {
     let value = parse_env::<f32>(key, raw)?;
     ensure!((0.0..=2.0).contains(&value), "{key} must be within 0 and 2");
@@ -186,6 +203,9 @@ mod tests {
             ("AGENT_MAX_TOKENS", "9000"),
             ("AGENT_TEMPERATURE", "0.3"),
             ("AGENT_TOP_P", "0.9"),
+            ("AGENT_MAX_ITERATIONS", "10"),
+            ("AGENT_SUBAGENT_MAX_ITERATIONS", "25"),
+            ("AGENT_AUTO_COMPACT_TOKEN_THRESHOLD", "45000"),
             ("SERVER_HOST", "127.0.0.1"),
             ("SERVER_PORT", "19000"),
             ("CORS_ALLOW_ORIGINS", "http://a.example, http://b.example"),
@@ -206,6 +226,9 @@ mod tests {
         assert_eq!(config.agent.max_tokens, 9000);
         assert_eq!(config.agent.temperature, Some(0.3));
         assert_eq!(config.agent.top_p, Some(0.9));
+        assert_eq!(config.agent.max_iterations, 10);
+        assert_eq!(config.agent.subagent_max_iterations, 25);
+        assert_eq!(config.agent.auto_compact_token_threshold, 45_000);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 19000);
         assert_eq!(

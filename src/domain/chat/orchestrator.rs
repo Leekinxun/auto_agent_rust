@@ -11,7 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::config::model::AppConfig;
 use crate::domain::chat::compaction::{
-    TOKEN_THRESHOLD, auto_compact, estimate_tokens, microcompact, public_compaction_tool_schemas,
+    auto_compact, estimate_tokens, microcompact, public_compaction_tool_schemas,
 };
 use crate::domain::chat::models::{
     ChatEvent, ChatMode, ChatRequest, ChatResult, HistoryEntry, OutputFile, SkillUsage,
@@ -81,9 +81,9 @@ impl ChatOrchestrator {
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
 
-        for _ in 0..8 {
+        for _ in 0..self.config.agent.max_iterations {
             microcompact(&mut messages);
-            if estimate_tokens(&messages) > TOKEN_THRESHOLD {
+            if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                 messages =
                     auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
             }
@@ -185,9 +185,9 @@ impl ChatOrchestrator {
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
 
-        for _ in 0..8 {
+        for _ in 0..self.config.agent.max_iterations {
             microcompact(&mut messages);
-            if estimate_tokens(&messages) > TOKEN_THRESHOLD {
+            if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                 messages =
                     auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
             }
@@ -262,19 +262,14 @@ impl ChatOrchestrator {
                 if !output_files.is_empty() {
                     let _ = sender.send(ChatEvent::OutputFiles(output_files)).await;
                 }
-                let skills_updated = self
-                    .finalize_memory_side_effects(
-                        &mode,
-                        prepared.session.as_deref(),
-                        prepared.user_id.as_deref(),
-                        &prepared.user_message,
-                        &full_reply,
-                        &skill_usages,
-                    )
-                    .await;
-                if !skills_updated.is_empty() {
-                    let _ = sender.send(ChatEvent::SkillsUpdated(skills_updated)).await;
-                }
+                self.spawn_stream_memory_side_effects(
+                    &mode,
+                    prepared.session.clone(),
+                    prepared.user_id.clone(),
+                    prepared.user_message.clone(),
+                    full_reply.clone(),
+                    skill_usages.clone(),
+                );
                 log_final_reply(
                     &mode,
                     prepared.session.as_deref(),
@@ -334,6 +329,14 @@ impl ChatOrchestrator {
                 finish_reason: "length".to_string(),
             })
             .await;
+        self.spawn_stream_memory_side_effects(
+            &mode,
+            prepared.session.clone(),
+            prepared.user_id.clone(),
+            prepared.user_message.clone(),
+            full_reply.clone(),
+            skill_usages.clone(),
+        );
         log_final_reply(
             &mode,
             prepared.session.as_deref(),
@@ -595,7 +598,7 @@ impl ChatOrchestrator {
     }
 
     async fn run_subagent(&self, prompt: &str, agent_type: &str) -> String {
-        let mut messages = vec![ChatMessage::user(prompt.to_string())];
+        let mut messages = build_subagent_initial_messages(prompt);
         let mut final_reply = "(no summary)".to_string();
         let mut tools = vec![json!({
             "type": "function",
@@ -643,7 +646,7 @@ impl ChatOrchestrator {
             }));
         }
 
-        for _ in 0..30 {
+        for _ in 0..self.config.agent.subagent_max_iterations {
             let response = match self
                 .llm_client
                 .chat(&ChatCompletionRequest {
@@ -715,6 +718,7 @@ impl ChatOrchestrator {
                 &self.llm_client,
                 &self.config.agent.model_id,
                 self.config.memory.file_memory.update_max_tokens,
+                self.config.agent.max_iterations,
                 user_id,
                 user_message,
                 assistant_reply,
@@ -742,6 +746,7 @@ impl ChatOrchestrator {
                 &self.llm_client,
                 &self.config.agent.model_id,
                 self.config.skills.learning.update_max_tokens,
+                self.config.agent.max_iterations,
                 Some(user_id),
                 skill_usages,
                 user_message,
@@ -836,6 +841,39 @@ impl ChatOrchestrator {
             ));
         }
     }
+
+    fn spawn_stream_memory_side_effects(
+        &self,
+        mode: &ChatMode,
+        session: Option<Arc<SessionContext>>,
+        user_id: Option<String>,
+        user_message: String,
+        assistant_reply: String,
+        skill_usages: Vec<SkillUsage>,
+    ) {
+        if !matches!(mode, ChatMode::Memory) {
+            return;
+        }
+
+        let orchestrator = self.clone();
+        tokio::spawn(async move {
+            let updated_skills = orchestrator
+                .finalize_memory_side_effects(
+                    &ChatMode::Memory,
+                    session.as_deref(),
+                    user_id.as_deref(),
+                    &user_message,
+                    &assistant_reply,
+                    &skill_usages,
+                )
+                .await;
+            tracing::info!(
+                user_id = user_id.as_deref().unwrap_or("-"),
+                updated_skills = updated_skills.len(),
+                "background memory side effects finished"
+            );
+        });
+    }
 }
 
 fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Value> {
@@ -928,6 +966,15 @@ fn build_response_history(
         content: assistant_reply.to_string(),
     });
     output
+}
+
+fn build_subagent_initial_messages(prompt: &str) -> Vec<ChatMessage> {
+    vec![
+        ChatMessage::system(
+            "You are an isolated subagent. You do not inherit the parent agent's conversation history, session state, memory files, or loaded skills unless they are explicitly included in the task prompt or tool outputs.",
+        ),
+        ChatMessage::user(prompt.to_string()),
+    ]
 }
 
 fn log_final_reply(
@@ -1067,7 +1114,9 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ChatMode, log_final_reply, static_public_tool_schemas};
+    use super::{
+        ChatMode, build_subagent_initial_messages, log_final_reply, static_public_tool_schemas,
+    };
     use std::collections::HashSet;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
@@ -1150,6 +1199,22 @@ mod tests {
         assert!(output.contains("user-123"));
         assert!(output.contains("finish_reason"));
         assert!(output.contains("stop"));
+    }
+
+    #[test]
+    fn subagent_starts_with_isolated_context_only() {
+        let messages = build_subagent_initial_messages("inspect README");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "system");
+        assert!(
+            messages[0]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("isolated subagent")
+        );
+        assert_eq!(messages[1].role, "user");
+        assert_eq!(messages[1].content.as_deref(), Some("inspect README"));
     }
 
     #[derive(Clone, Default)]

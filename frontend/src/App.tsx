@@ -412,6 +412,10 @@ export default function App() {
   }, [sidebarCollapsed]);
 
   useEffect(() => {
+    document.title = settings.brandTitle.trim() || DEFAULT_SETTINGS.brandTitle;
+  }, [settings.brandTitle]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function run(silent = false) {
