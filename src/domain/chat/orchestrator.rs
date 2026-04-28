@@ -78,6 +78,7 @@ impl ChatOrchestrator {
         let mut messages = prepared.messages;
         let tools = self.load_public_tools(prepared.session.is_some()).await;
         let mut reply = String::new();
+        let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
 
         for _ in 0..8 {
@@ -98,8 +99,10 @@ impl ChatOrchestrator {
                 )?)
                 .await?;
             let Some(choice) = response.choices.into_iter().next() else {
+                finish_reason = "empty".to_string();
                 break;
             };
+            finish_reason = choice.finish_reason.unwrap_or_else(|| "stop".to_string());
             let assistant = choice.message;
             let tool_calls = assistant.tool_calls.clone();
             let assistant_content = assistant.content.clone().unwrap_or_default();
@@ -138,6 +141,14 @@ impl ChatOrchestrator {
                     auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
             }
         }
+
+        log_final_reply(
+            &mode,
+            prepared.session.as_deref(),
+            prepared.user_id.as_deref(),
+            &finish_reason,
+            &reply,
+        );
 
         let output_files = extract_output_files(&self.repo_root, &reply);
         let history =
@@ -264,6 +275,13 @@ impl ChatOrchestrator {
                 if !skills_updated.is_empty() {
                     let _ = sender.send(ChatEvent::SkillsUpdated(skills_updated)).await;
                 }
+                log_final_reply(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    &finish_reason,
+                    &full_reply,
+                );
                 let _ = sender.send(ChatEvent::Done { finish_reason }).await;
                 return Ok(());
             }
@@ -316,6 +334,13 @@ impl ChatOrchestrator {
                 finish_reason: "length".to_string(),
             })
             .await;
+        log_final_reply(
+            &mode,
+            prepared.session.as_deref(),
+            prepared.user_id.as_deref(),
+            "length",
+            &full_reply,
+        );
         Ok(())
     }
 
@@ -905,6 +930,46 @@ fn build_response_history(
     output
 }
 
+fn log_final_reply(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    finish_reason: &str,
+    assistant_reply: &str,
+) {
+    let mode = match mode {
+        ChatMode::Stateless => "stateless",
+        ChatMode::Memory => "memory",
+    };
+    let session_id = session
+        .map(|session| session.session_id.as_str())
+        .unwrap_or("-");
+    let user_id = user_id.unwrap_or("-");
+    let reply_chars = assistant_reply.chars().count();
+
+    if assistant_reply.is_empty() {
+        tracing::info!(
+            mode,
+            session_id,
+            user_id,
+            finish_reason,
+            reply_chars,
+            "llm final reply is empty"
+        );
+        return;
+    }
+
+    tracing::info!(
+        mode,
+        session_id,
+        user_id,
+        finish_reason,
+        reply_chars,
+        "llm final reply follows\n{}",
+        assistant_reply
+    );
+}
+
 fn should_use_mcp_file_reader(arguments: &serde_json::Value) -> bool {
     let Some(path) = arguments.get("path").and_then(|value| value.as_str()) else {
         return false;
@@ -1002,8 +1067,10 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 
 #[cfg(test)]
 mod tests {
-    use super::static_public_tool_schemas;
+    use super::{ChatMode, log_final_reply, static_public_tool_schemas};
     use std::collections::HashSet;
+    use std::io::{self, Write};
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn static_public_tool_surface_matches_reference_set_except_dynamic_mcp() {
@@ -1053,5 +1120,80 @@ mod tests {
         .collect::<HashSet<_>>();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn logs_full_final_reply_content() {
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_final_reply(
+                &ChatMode::Memory,
+                None,
+                Some("user-123"),
+                "stop",
+                "第一行回复\n第二行回复",
+            );
+        });
+
+        let output = writer.contents();
+        assert!(output.contains("llm final reply follows"));
+        assert!(output.contains("第一行回复"));
+        assert!(output.contains("第二行回复"));
+        assert!(output.contains("memory"));
+        assert!(output.contains("user_id"));
+        assert!(output.contains("user-123"));
+        assert!(output.contains("finish_reason"));
+        assert!(output.contains("stop"));
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(
+                self.buffer
+                    .lock()
+                    .expect("log buffer lock poisoned")
+                    .clone(),
+            )
+            .expect("log buffer must be utf-8")
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    struct SharedWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("log buffer lock poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
     }
 }

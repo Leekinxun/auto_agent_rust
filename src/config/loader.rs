@@ -108,6 +108,9 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["MCP_CONNECT_TIMEOUT"]) {
         config.mcp.connect_timeout = parse_positive_u64("MCP_CONNECT_TIMEOUT", &value)?;
     }
+    if let Some(value) = first_non_empty_env(get_env, &["LOG_DIR"]) {
+        config.logging.dir = value;
+    }
 
     Ok(())
 }
@@ -192,6 +195,7 @@ mod tests {
             ("MCP_BASE_URL", "http://mcp.example/mcp"),
             ("MCP_TIMEOUT", "120"),
             ("MCP_CONNECT_TIMEOUT", "5"),
+            ("LOG_DIR", "runtime-logs"),
         ]);
 
         apply_env_overrides_with(&mut config, &|key| env.get(key).cloned()).unwrap();
@@ -217,6 +221,7 @@ mod tests {
         assert_eq!(config.mcp.base_url, "http://mcp.example/mcp");
         assert_eq!(config.mcp.timeout, 120);
         assert_eq!(config.mcp.connect_timeout, 5);
+        assert_eq!(config.logging.dir, "runtime-logs");
     }
 
     #[test]

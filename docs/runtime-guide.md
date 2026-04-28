@@ -46,6 +46,12 @@ config/config.yaml
 - 如果 shell 中已经显式导出了同名环境变量，则以 shell 环境为准
 - 如果仓库根目录不存在 `.env`，启动不会报错
 
+日志默认同时输出到 stdout 和仓库根目录 `logs/`，并按日期写入独立文件，例如：
+
+```text
+logs/backend-2026-04-28.log
+```
+
 ### 1.3 前端当前暴露的聊天模式
 
 当前前端只保留两个聊天工作区：
@@ -113,6 +119,12 @@ export CORS_ALLOW_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
 | `MCP_TIMEOUT` | `mcp.timeout` | 请求超时秒数，必须大于 0 |
 | `MCP_CONNECT_TIMEOUT` | `mcp.connect_timeout` | 连接超时秒数，必须大于 0 |
 
+### 3.4 Logging
+
+| 环境变量 | 覆盖字段 | 说明 |
+| --- | --- | --- |
+| `LOG_DIR` | `logging.dir` | 日志目录；相对路径默认相对仓库根目录 |
+
 ## 4. 持久化目录
 
 以下目录建议在部署时持久化：
@@ -120,6 +132,7 @@ export CORS_ALLOW_ORIGINS="http://localhost:5173,http://127.0.0.1:5173"
 | 目录 | 用途 |
 | --- | --- |
 | `skills/` | 公共 skills（共享 skill CRUD） |
+| `logs/` | 后端运行日志，按日期分文件保存 |
 | `.user_memories/` | 用户文件记忆：`USER.md` / `MEMORY.md` / 私有 skills |
 | `uploads/` | 上传文件暂存 |
 | `outputs/` | 生成文件输出 |
@@ -141,6 +154,7 @@ docker compose up -d --build
 
 - `config`
 - `skills`
+- `logs`
 - `.user_memories`
 - `uploads`
 - `outputs`
@@ -166,6 +180,7 @@ docker run -d \
   -p 18000:18000 \
   -v "$(pwd)/config:/app/config:ro" \
   -v "$(pwd)/skills:/app/skills" \
+  -v "$(pwd)/logs:/app/logs" \
   -v "$(pwd)/.user_memories:/app/.user_memories" \
   -v "$(pwd)/uploads:/app/uploads" \
   -v "$(pwd)/outputs:/app/outputs" \

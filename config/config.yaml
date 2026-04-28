@@ -29,6 +29,10 @@ mcp:
   timeout: 60
   connect_timeout: 10
 
+# ---------- 日志 ----------
+logging:
+  dir: "logs"
+
 # ---------- 文件记忆 ----------
 memory:
   file_memory:

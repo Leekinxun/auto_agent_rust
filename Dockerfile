@@ -34,7 +34,7 @@ COPY config ./config
 COPY skills ./skills
 COPY --from=frontend-builder /app/static/frontend ./static/frontend
 
-RUN mkdir -p /app/uploads /app/outputs /app/.user_memories /app/.tasks /app/.worktrees /app/.sessions /app/.transcripts
+RUN mkdir -p /app/logs /app/uploads /app/outputs /app/.user_memories /app/.tasks /app/.worktrees /app/.sessions /app/.transcripts
 
 EXPOSE 18000
 

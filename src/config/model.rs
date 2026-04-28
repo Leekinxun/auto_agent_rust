@@ -6,6 +6,7 @@ pub struct AppConfig {
     pub agent: AgentConfig,
     pub server: ServerConfig,
     pub mcp: McpConfig,
+    pub logging: LoggingConfig,
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
 }
@@ -16,6 +17,7 @@ impl Default for AppConfig {
             agent: AgentConfig::default(),
             server: ServerConfig::default(),
             mcp: McpConfig::default(),
+            logging: LoggingConfig::default(),
             memory: MemoryConfig::default(),
             skills: SkillsConfig::default(),
         }
@@ -100,6 +102,20 @@ impl Default for McpConfig {
             base_url: "http://localhost:8444/mcp".to_string(),
             timeout: 60,
             connect_timeout: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct LoggingConfig {
+    pub dir: String,
+}
+
+impl Default for LoggingConfig {
+    fn default() -> Self {
+        Self {
+            dir: "logs".to_string(),
         }
     }
 }

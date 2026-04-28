@@ -23,6 +23,7 @@ services:
       MCP_BASE_URL: "${MCP_BASE_URL:-}"
       MCP_TIMEOUT: "${MCP_TIMEOUT:-}"
       MCP_CONNECT_TIMEOUT: "${MCP_CONNECT_TIMEOUT:-}"
+      LOG_DIR: "${LOG_DIR:-logs}"
       CORS_ALLOW_ORIGINS: "${CORS_ALLOW_ORIGINS:-*}"
       CORS_ALLOW_CREDENTIALS: "${CORS_ALLOW_CREDENTIALS:-false}"
       CORS_ALLOW_METHODS: "${CORS_ALLOW_METHODS:-*}"
@@ -30,6 +31,7 @@ services:
     volumes:
       - ./config:/app/config:ro
       - ./skills:/app/skills
+      - ./logs:/app/logs
       - ./.user_memories:/app/.user_memories
       - ./outputs:/app/outputs
       - ./uploads:/app/uploads

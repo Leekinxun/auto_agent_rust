@@ -31,6 +31,8 @@ cargo run
 当前会自动尝试加载仓库根目录 `.env`，便于本地开发时直接覆盖关键环境变量；如果 shell 中已显式导出同名环境变量，则仍以 shell 环境为准。
 
 > `frontend` 的构建产物会输出到 `static/frontend/`，Rust 后端会直接托管该目录。
+>
+> 后端日志会同时输出到 stdout 和仓库根目录 `logs/`，按日期分文件保存，默认文件名形如 `backend-2026-04-28.log`。
 
 ## Docker 启动
 
@@ -56,6 +58,7 @@ docker run -d \
   -p 18000:18000 \
   -v "$(pwd)/config:/app/config:ro" \
   -v "$(pwd)/skills:/app/skills" \
+  -v "$(pwd)/logs:/app/logs" \
   -v "$(pwd)/.user_memories:/app/.user_memories" \
   -v "$(pwd)/uploads:/app/uploads" \
   -v "$(pwd)/outputs:/app/outputs" \
@@ -150,7 +153,8 @@ docker run -d \
   - `MCP_BASE_URL`
   - `MCP_TIMEOUT`
   - `MCP_CONNECT_TIMEOUT`
+  - `LOG_DIR`
 - 空字符串环境变量会被忽略；数值型覆盖如果非法会在启动阶段直接报错，避免静默使用错误配置。
-- Docker Compose 已补充 `config`、`skills`、`.tasks`、`.worktrees`、`.sessions`、`.transcripts` 等挂载，便于持久化运行态数据。
+- Docker Compose 已补充 `config`、`skills`、`logs`、`.tasks`、`.worktrees`、`.sessions`、`.transcripts` 等挂载，便于持久化运行态数据。
 
 更多细节见 [`docs/runtime-guide.md`](docs/runtime-guide.md)。
