@@ -81,6 +81,7 @@ export type AppSettings = {
   modelId: string;
   temperature: string;
   maxTokens: string;
+  maxIterations: string;
   topP: string;
 };
 

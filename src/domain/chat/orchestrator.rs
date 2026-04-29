@@ -75,13 +75,15 @@ impl ChatOrchestrator {
     pub async fn run(&self, request: ChatRequest, mode: ChatMode) -> Result<ChatResult> {
         let mut skill_usages = Vec::new();
         let prepared = self.prepare_request(request, &mode)?;
+        let max_iterations =
+            resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
         let tools = self.load_public_tools(prepared.session.is_some()).await;
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
 
-        for _ in 0..self.config.agent.max_iterations {
+        for _ in 0..max_iterations {
             microcompact(&mut messages);
             if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                 messages =
@@ -142,6 +144,16 @@ impl ChatOrchestrator {
             }
         }
 
+        if reply.trim().is_empty() {
+            if let Some(recovered_reply) = self
+                .recover_missing_final_reply(&messages, &prepared.llm_overrides, &finish_reason)
+                .await?
+            {
+                reply = recovered_reply;
+                finish_reason = "stop".to_string();
+            }
+        }
+
         log_final_reply(
             &mode,
             prepared.session.as_deref(),
@@ -180,12 +192,14 @@ impl ChatOrchestrator {
     ) -> Result<()> {
         let mut skill_usages = Vec::new();
         let prepared = self.prepare_request(request, &mode)?;
+        let max_iterations =
+            resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
         let tools = self.load_public_tools(prepared.session.is_some()).await;
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
 
-        for _ in 0..self.config.agent.max_iterations {
+        for _ in 0..max_iterations {
             microcompact(&mut messages);
             if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                 messages =
@@ -258,6 +272,26 @@ impl ChatOrchestrator {
             ));
 
             if tool_calls.is_empty() {
+                if full_reply.trim().is_empty() {
+                    if let Some(recovered_reply) = self
+                        .recover_missing_final_reply(
+                            &messages,
+                            &prepared.llm_overrides,
+                            &finish_reason,
+                        )
+                        .await?
+                    {
+                        full_reply = recovered_reply.clone();
+                        finish_reason = "stop".to_string();
+                        let _ = sender.send(ChatEvent::Text(recovered_reply)).await;
+                    } else {
+                        let detail = build_empty_stream_reply_error(&finish_reason, max_iterations);
+                        tracing::warn!(finish_reason, "stream ended without visible reply");
+                        let _ = sender.send(ChatEvent::Error { detail }).await;
+                        return Ok(());
+                    }
+                }
+
                 let output_files = extract_output_files(&self.repo_root, &full_reply);
                 if !output_files.is_empty() {
                     let _ = sender.send(ChatEvent::OutputFiles(output_files)).await;
@@ -324,9 +358,29 @@ impl ChatOrchestrator {
             }
         }
 
+        let mut final_finish_reason = "max_iterations".to_string();
+        if full_reply.trim().is_empty() {
+            if let Some(recovered_reply) = self
+                .recover_missing_final_reply(&messages, &prepared.llm_overrides, "max_iterations")
+                .await?
+            {
+                full_reply = recovered_reply.clone();
+                final_finish_reason = "stop".to_string();
+                let _ = sender.send(ChatEvent::Text(recovered_reply)).await;
+            } else {
+                let detail = build_empty_stream_reply_error("max_iterations", max_iterations);
+                tracing::warn!(
+                    max_iterations,
+                    "stream exhausted iteration budget without visible reply"
+                );
+                let _ = sender.send(ChatEvent::Error { detail }).await;
+                return Ok(());
+            }
+        }
+
         let _ = sender
             .send(ChatEvent::Done {
-                finish_reason: "length".to_string(),
+                finish_reason: final_finish_reason.clone(),
             })
             .await;
         self.spawn_stream_memory_side_effects(
@@ -341,7 +395,7 @@ impl ChatOrchestrator {
             &mode,
             prepared.session.as_deref(),
             prepared.user_id.as_deref(),
-            "length",
+            &final_finish_reason,
             &full_reply,
         );
         Ok(())
@@ -699,6 +753,41 @@ impl ChatOrchestrator {
         final_reply
     }
 
+    async fn recover_missing_final_reply(
+        &self,
+        messages: &[ChatMessage],
+        overrides: &crate::domain::chat::models::LlmOverrides,
+        finish_reason: &str,
+    ) -> Result<Option<String>> {
+        tracing::warn!(
+            finish_reason,
+            "attempting final-answer recovery after empty assistant output"
+        );
+
+        let mut recovery_messages = messages.to_vec();
+        recovery_messages.push(ChatMessage::user(build_missing_reply_recovery_prompt(
+            finish_reason,
+        )));
+
+        let response = self
+            .llm_client
+            .chat(&self.build_llm_request_options(recovery_messages, None, false, overrides)?)
+            .await?;
+        let Some(choice) = response.choices.into_iter().next() else {
+            return Ok(None);
+        };
+        let reply = choice
+            .message
+            .content
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if reply.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(reply))
+    }
+
     async fn finalize_memory_side_effects(
         &self,
         mode: &ChatMode,
@@ -977,6 +1066,31 @@ fn build_subagent_initial_messages(prompt: &str) -> Vec<ChatMessage> {
     ]
 }
 
+fn resolve_max_iterations(
+    overrides: &crate::domain::chat::models::LlmOverrides,
+    default_max_iterations: usize,
+) -> usize {
+    overrides.max_iterations.unwrap_or(default_max_iterations)
+}
+
+fn build_missing_reply_recovery_prompt(finish_reason: &str) -> String {
+    format!(
+        "<final-answer-required>\nThe previous assistant attempt ended without any user-visible answer (finish_reason: {finish_reason}). Based only on the conversation and tool results already available, provide the best possible final answer now. Do not call tools. If something remains incomplete, explain that clearly.\n</final-answer-required>"
+    )
+}
+
+fn build_empty_stream_reply_error(finish_reason: &str, max_iterations: usize) -> String {
+    if finish_reason == "max_iterations" {
+        return format!(
+            "模型在 {max_iterations} 轮工具/推理后仍未生成可展示内容。请重试，或调高当前最大轮次设置（前端 Max Iterations / 后端 AGENT_MAX_ITERATIONS）。"
+        );
+    }
+
+    format!(
+        "模型返回了空白流式结果（finish_reason: {finish_reason}）。系统已尝试补救生成最终答案，但仍未得到可展示内容，请重试。"
+    )
+}
+
 fn log_final_reply(
     mode: &ChatMode,
     session: Option<&SessionContext>,
@@ -1115,8 +1229,10 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMode, build_subagent_initial_messages, log_final_reply, static_public_tool_schemas,
+        ChatMode, build_missing_reply_recovery_prompt, build_subagent_initial_messages,
+        log_final_reply, resolve_max_iterations, static_public_tool_schemas,
     };
+    use crate::domain::chat::models::LlmOverrides;
     use std::collections::HashSet;
     use std::io::{self, Write};
     use std::sync::{Arc, Mutex};
@@ -1215,6 +1331,36 @@ mod tests {
         );
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content.as_deref(), Some("inspect README"));
+    }
+
+    #[test]
+    fn recovery_prompt_forces_final_answer_without_tools() {
+        let prompt = build_missing_reply_recovery_prompt("max_iterations");
+        assert!(prompt.contains("without any user-visible answer"));
+        assert!(prompt.contains("finish_reason: max_iterations"));
+        assert!(prompt.contains("Do not call tools"));
+    }
+
+    #[test]
+    fn request_override_max_iterations_takes_precedence() {
+        let overrides = LlmOverrides {
+            model_id: None,
+            temperature: None,
+            max_tokens: None,
+            max_iterations: Some(6),
+            top_p: None,
+        };
+        assert_eq!(resolve_max_iterations(&overrides, 12), 6);
+        assert_eq!(
+            resolve_max_iterations(
+                &LlmOverrides {
+                    max_iterations: None,
+                    ..overrides
+                },
+                12
+            ),
+            12
+        );
     }
 
     #[derive(Clone, Default)]

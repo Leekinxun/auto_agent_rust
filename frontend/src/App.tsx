@@ -50,6 +50,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   modelId: "",
   temperature: "",
   maxTokens: "",
+  maxIterations: "",
   topP: ""
 };
 
@@ -256,6 +257,7 @@ function loadSettings(): AppSettings {
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
       maxTokens: typeof parsed.maxTokens === "string" ? parsed.maxTokens : DEFAULT_SETTINGS.maxTokens,
+      maxIterations: typeof parsed.maxIterations === "string" ? parsed.maxIterations : DEFAULT_SETTINGS.maxIterations,
       topP: typeof parsed.topP === "string" ? parsed.topP : DEFAULT_SETTINGS.topP
     };
   } catch {
@@ -371,6 +373,7 @@ export default function App() {
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
   const [draftTemperature, setDraftTemperature] = useState(settings.temperature);
   const [draftMaxTokens, setDraftMaxTokens] = useState(settings.maxTokens);
+  const [draftMaxIterations, setDraftMaxIterations] = useState(settings.maxIterations);
   const [draftTopP, setDraftTopP] = useState(settings.topP);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [health, setHealth] = useState<HealthState>({ tone: "loading", label: "连接中..." });
@@ -392,6 +395,7 @@ export default function App() {
     setDraftModelId(settings.modelId);
     setDraftTemperature(settings.temperature);
     setDraftMaxTokens(settings.maxTokens);
+    setDraftMaxIterations(settings.maxIterations);
     setDraftTopP(settings.topP);
   }, [settings]);
 
@@ -772,7 +776,7 @@ export default function App() {
     }));
 
     if (finishReason !== "stop") {
-      showToast(`流式响应结束：${finishReason}`, "info");
+      showToast(`流式响应结束：${describeFinishReason(finishReason)}`, "info");
     }
 
     updateChat(config.id, (current) => ({
@@ -1111,12 +1115,14 @@ export default function App() {
                     brandTitle={draftBrandTitle}
                     brandSubtitle={draftBrandSubtitle}
                     health={health}
+                    maxIterations={draftMaxIterations}
                     maxTokens={draftMaxTokens}
                     memoryUserId={draftMemoryUserId}
                     modelId={draftModelId}
                     temperature={draftTemperature}
                     topP={draftTopP}
                     onApiBaseChange={setDraftApiBase}
+                    onMaxIterationsChange={setDraftMaxIterations}
                     onMaxTokensChange={setDraftMaxTokens}
                     onBrandSubtitleChange={setDraftBrandSubtitle}
                     onBrandTitleChange={setDraftBrandTitle}
@@ -1130,6 +1136,7 @@ export default function App() {
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
                       setDraftTemperature(DEFAULT_SETTINGS.temperature);
                       setDraftMaxTokens(DEFAULT_SETTINGS.maxTokens);
+                      setDraftMaxIterations(DEFAULT_SETTINGS.maxIterations);
                       setDraftTopP(DEFAULT_SETTINGS.topP);
                     }}
                     onSave={() => {
@@ -1143,6 +1150,7 @@ export default function App() {
                           modelId: draftModelId.trim(),
                           temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
                           maxTokens: normalizeOptionalNumericSetting(draftMaxTokens, "Max Tokens", "int", 1),
+                          maxIterations: normalizeOptionalNumericSetting(draftMaxIterations, "Max Iterations", "int", 1),
                           topP: normalizeOptionalNumericSetting(draftTopP, "Top P", "float", 0.01, 1)
                         });
                         showToast("设置已保存", "success");
@@ -1440,6 +1448,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function describeFinishReason(finishReason: string) {
+  switch (finishReason) {
+    case "max_iterations":
+      return "达到最大工具/推理轮次上限";
+    case "length":
+      return "输出达到模型长度上限";
+    case "stop":
+      return "正常结束";
+    case "tool_calls":
+      return "等待工具调用";
+    case "empty":
+      return "模型未返回有效内容";
+    default:
+      return finishReason;
+  }
+}
+
 function renderProcessItem(item: ProcessItem, index: number) {
   if (isRecord(item) && item.event === "tool_use") {
     const title = typeof item.name === "string" && item.name.trim() ? item.name : "unknown";
@@ -1524,7 +1549,7 @@ function renderProcessItem(item: ProcessItem, index: number) {
           <span className="process-badge">DONE</span>
           <strong>流式完成</strong>
         </div>
-        <div className="process-note">finish_reason: {finishReason}</div>
+        <div className="process-note">finish_reason: {finishReason} · {describeFinishReason(finishReason)}</div>
       </div>
     );
   }
@@ -2018,6 +2043,7 @@ function SettingsWorkspace(props: {
   modelId: string;
   temperature: string;
   maxTokens: string;
+  maxIterations: string;
   topP: string;
   onApiBaseChange: (value: string) => void;
   onBrandTitleChange: (value: string) => void;
@@ -2026,6 +2052,7 @@ function SettingsWorkspace(props: {
   onModelIdChange: (value: string) => void;
   onTemperatureChange: (value: string) => void;
   onMaxTokensChange: (value: string) => void;
+  onMaxIterationsChange: (value: string) => void;
   onTopPChange: (value: string) => void;
   onTest: () => void;
   onReset: () => void;
@@ -2036,12 +2063,14 @@ function SettingsWorkspace(props: {
     brandTitle,
     brandSubtitle,
     health,
+    maxIterations,
     maxTokens,
     memoryUserId,
     modelId,
     temperature,
     topP,
     onApiBaseChange,
+    onMaxIterationsChange,
     onMaxTokensChange,
     onBrandSubtitleChange,
     onBrandTitleChange,
@@ -2101,6 +2130,11 @@ function SettingsWorkspace(props: {
             <small>正整数，控制单次回复的最大 token 上限。</small>
           </label>
           <label className="field">
+            <span>Max Iterations</span>
+            <input onChange={(event) => onMaxIterationsChange(event.target.value)} placeholder="例如：12" value={maxIterations} />
+            <small>正整数，控制单次对话里模型最多能进行多少轮工具/推理迭代。</small>
+          </label>
+          <label className="field">
             <span>Temperature</span>
             <input onChange={(event) => onTemperatureChange(event.target.value)} placeholder="0 ~ 2，留空使用默认" value={temperature} />
             <small>数值越高越发散，越低越稳定。</small>
@@ -2146,7 +2180,7 @@ function SettingsWorkspace(props: {
           <article className="stat-card">
             <div className="soft-chip">LLM Override</div>
             <h3>{modelId || "后端默认模型"}</h3>
-            <p>Temp {temperature || "默认"} · Max {maxTokens || "默认"} · Top P {topP || "默认"}</p>
+            <p>Temp {temperature || "默认"} · Max {maxTokens || "默认"} · Iter {maxIterations || "默认"} · Top P {topP || "默认"}</p>
           </article>
           <article className="stat-card">
             <div className="soft-chip">Storage</div>

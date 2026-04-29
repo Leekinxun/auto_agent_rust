@@ -126,6 +126,7 @@ async fn parse_chat_multipart(
     let mut model_id: Option<String> = None;
     let mut temperature: Option<f32> = None;
     let mut max_tokens: Option<u32> = None;
+    let mut max_iterations: Option<usize> = None;
     let mut top_p: Option<f32> = None;
     let mut files = Vec::new();
 
@@ -147,6 +148,9 @@ async fn parse_chat_multipart(
             "model_id" => model_id = non_empty(value),
             "temperature" => temperature = parse_optional_number::<f32>(&value, "temperature")?,
             "max_tokens" => max_tokens = parse_optional_number::<u32>(&value, "max_tokens")?,
+            "max_iterations" => {
+                max_iterations = parse_optional_number::<usize>(&value, "max_iterations")?
+            }
             "top_p" => top_p = parse_optional_number::<f32>(&value, "top_p")?,
             _ => {}
         }
@@ -173,6 +177,11 @@ async fn parse_chat_multipart(
             return Err(ApiError::bad_request("max_tokens 必须大于 0"));
         }
     }
+    if let Some(value) = max_iterations {
+        if value == 0 {
+            return Err(ApiError::bad_request("max_iterations 必须大于 0"));
+        }
+    }
 
     Ok(ChatRequest {
         message,
@@ -185,6 +194,7 @@ async fn parse_chat_multipart(
             model_id,
             temperature,
             max_tokens,
+            max_iterations,
             top_p,
         },
     })

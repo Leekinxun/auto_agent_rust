@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CHAT_MODES, createInitialChats, getPathForView, getViewFromPath, isChatView } from "./utils";
+import { CHAT_MODES, buildFormData, createInitialChats, getPathForView, getViewFromPath, isChatView } from "./utils";
 
 describe("frontend chat surface", () => {
   it("only exposes the two streaming chat modes", () => {
@@ -26,5 +26,27 @@ describe("frontend chat surface", () => {
     expect(isChatView("memoryStream")).toBe(true);
     expect(isChatView("skills")).toBe(false);
     expect(isChatView("settings")).toBe(false);
+  });
+
+  it("includes max iterations in chat form data when configured", () => {
+    const formData = buildFormData(
+      CHAT_MODES.stream,
+      [],
+      "hello",
+      [],
+      {
+        apiBase: "http://localhost:8080",
+        brandTitle: "brand",
+        brandSubtitle: "subtitle",
+        memoryUserId: "user-1",
+        modelId: "demo-model",
+        temperature: "0.2",
+        maxTokens: "4096",
+        maxIterations: "9",
+        topP: "0.9"
+      }
+    );
+
+    expect(formData.get("max_iterations")).toBe("9");
   });
 });

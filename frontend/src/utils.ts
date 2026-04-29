@@ -237,6 +237,7 @@ export function buildFormData(
   appendOptionalFormData(formData, "model_id", settings.modelId);
   appendOptionalFormData(formData, "temperature", settings.temperature);
   appendOptionalFormData(formData, "max_tokens", settings.maxTokens);
+  appendOptionalFormData(formData, "max_iterations", settings.maxIterations);
   appendOptionalFormData(formData, "top_p", settings.topP);
   files.forEach((file) => formData.append("files", file));
   return formData;

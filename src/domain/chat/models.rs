@@ -27,6 +27,7 @@ pub struct LlmOverrides {
     pub model_id: Option<String>,
     pub temperature: Option<f32>,
     pub max_tokens: Option<u32>,
+    pub max_iterations: Option<usize>,
     pub top_p: Option<f32>,
 }
 
