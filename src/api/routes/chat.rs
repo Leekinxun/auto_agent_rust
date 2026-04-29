@@ -1,10 +1,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Multipart, State};
+use axum::extract::{Multipart, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
-use axum::routing::post;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::StreamExt;
+use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -17,10 +18,26 @@ use crate::domain::chat::models::{
 
 pub fn router() -> Router<SharedState> {
     Router::new()
+        .route("/system-prompt", get(agent_system_prompt))
         .route("/run", post(agent_run))
         .route("/stream", post(agent_stream))
         .route("/memory/run", post(agent_memory_run))
         .route("/memory/stream", post(agent_memory_stream))
+}
+
+#[derive(Debug, Deserialize)]
+struct SystemPromptQuery {
+    user_id: Option<String>,
+}
+
+async fn agent_system_prompt(
+    State(state): State<SharedState>,
+    Query(query): Query<SystemPromptQuery>,
+) -> ApiResult<Json<crate::domain::chat::models::SystemPromptPreview>> {
+    let preview = state
+        .chat_orchestrator
+        .preview_system_prompts(query.user_id.as_deref())?;
+    Ok(Json(preview))
 }
 
 async fn agent_run(
@@ -120,6 +137,7 @@ async fn parse_chat_multipart(
     let mut message: Option<String> = None;
     let mut history_json = String::from("[]");
     let mut system: Option<String> = None;
+    let mut system_append: Option<String> = None;
     let mut session_id: Option<String> = None;
     let mut user_id: Option<String> = None;
     let mut agent_id: Option<String> = None;
@@ -142,6 +160,7 @@ async fn parse_chat_multipart(
             "message" => message = Some(value),
             "history" => history_json = value,
             "system" => system = non_empty(value),
+            "system_append" => system_append = non_empty(value),
             "session_id" => session_id = non_empty(value),
             "user_id" => user_id = non_empty(value),
             "agent_id" => agent_id = non_empty(value),
@@ -187,6 +206,7 @@ async fn parse_chat_multipart(
         message,
         history,
         system,
+        system_append,
         session_id,
         user_id: user_id.or(agent_id),
         files,

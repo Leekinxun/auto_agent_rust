@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CHAT_MODES, buildFormData, createInitialChats, getPathForView, getViewFromPath, isChatView } from "./utils";
+import { CHAT_MODES, buildFormData, createInitialChats, getPathForView, getViewFromPath, isChatView, parseThinking, stripThinkingContent } from "./utils";
 
 describe("frontend chat surface", () => {
   it("only exposes the two streaming chat modes", () => {
@@ -39,6 +39,7 @@ describe("frontend chat surface", () => {
         brandTitle: "brand",
         brandSubtitle: "subtitle",
         memoryUserId: "user-1",
+        agentPromptAppend: "extra prompt",
         modelId: "demo-model",
         temperature: "0.2",
         maxTokens: "4096",
@@ -48,5 +49,20 @@ describe("frontend chat surface", () => {
     );
 
     expect(formData.get("max_iterations")).toBe("9");
+    expect(formData.get("system_append")).toBe("extra prompt");
+  });
+
+  it("hides incomplete think blocks from visible streaming text", () => {
+    expect(stripThinkingContent("<think>正在思考")).toBe("");
+    expect(stripThinkingContent("已输出<think>正在思考")).toBe("已输出");
+    expect(stripThinkingContent("前文<think>思考</think>后文")).toBe("前文后文");
+  });
+
+  it("parses completed think blocks and drops unfinished trailing think content", () => {
+    expect(parseThinking("前文<think>第一步</think>后文<think>未完成")).toEqual([
+      { type: "text", content: "前文" },
+      { type: "thinking", content: "第一步" },
+      { type: "text", content: "后文" }
+    ]);
   });
 });

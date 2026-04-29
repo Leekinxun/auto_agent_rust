@@ -38,15 +38,24 @@ import {
   readEventStream,
   renderMarkdown,
   SKILL_CREATE_PATH,
+  stripThinkingContent,
   suggestFolder
 } from "./utils";
 import { formatUnreadCount, getScrollButtonLabel, hasScrollButtonUnreadAccent } from "./chatScroll";
+
+type PromptPreviewState = {
+  loading: boolean;
+  error: string;
+  statelessPrompt: string;
+  memoryPrompt: string;
+};
 
 const DEFAULT_SETTINGS: AppSettings = {
   apiBase: normalizeApiBase(window.location.origin || "http://localhost:8080"),
   brandTitle: "中科院智能体平台",
   brandSubtitle: "统一承载多模式智能体对话、技能管理与平台配置。",
   memoryUserId: DEFAULT_MEMORY_USER_ID,
+  agentPromptAppend: "",
   modelId: "",
   temperature: "",
   maxTokens: "",
@@ -254,6 +263,7 @@ function loadSettings(): AppSettings {
       memoryUserId: typeof parsed.memoryUserId === "string" && parsed.memoryUserId.trim()
         ? parsed.memoryUserId.trim()
         : DEFAULT_SETTINGS.memoryUserId,
+      agentPromptAppend: typeof parsed.agentPromptAppend === "string" ? parsed.agentPromptAppend : DEFAULT_SETTINGS.agentPromptAppend,
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
       maxTokens: typeof parsed.maxTokens === "string" ? parsed.maxTokens : DEFAULT_SETTINGS.maxTokens,
@@ -370,6 +380,7 @@ export default function App() {
   const [draftBrandTitle, setDraftBrandTitle] = useState(settings.brandTitle);
   const [draftBrandSubtitle, setDraftBrandSubtitle] = useState(settings.brandSubtitle);
   const [draftMemoryUserId, setDraftMemoryUserId] = useState(settings.memoryUserId);
+  const [draftAgentPromptAppend, setDraftAgentPromptAppend] = useState(settings.agentPromptAppend);
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
   const [draftTemperature, setDraftTemperature] = useState(settings.temperature);
   const [draftMaxTokens, setDraftMaxTokens] = useState(settings.maxTokens);
@@ -385,6 +396,12 @@ export default function App() {
   const [skillsDeleting, setSkillsDeleting] = useState(false);
   const [skillEditor, setSkillEditor] = useState<SkillEditorState>(loadSkillEditor);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
+  const [promptPreview, setPromptPreview] = useState<PromptPreviewState>({
+    loading: false,
+    error: "",
+    statelessPrompt: "",
+    memoryPrompt: ""
+  });
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -392,6 +409,7 @@ export default function App() {
     setDraftBrandTitle(settings.brandTitle);
     setDraftBrandSubtitle(settings.brandSubtitle);
     setDraftMemoryUserId(settings.memoryUserId);
+    setDraftAgentPromptAppend(settings.agentPromptAppend);
     setDraftModelId(settings.modelId);
     setDraftTemperature(settings.temperature);
     setDraftMaxTokens(settings.maxTokens);
@@ -453,6 +471,43 @@ export default function App() {
       window.clearInterval(timer);
     };
   }, [settings.apiBase]);
+
+  useEffect(() => {
+    if (currentView !== "settings") {
+      return;
+    }
+
+    let cancelled = false;
+    setPromptPreview((current) => ({ ...current, loading: true, error: "" }));
+
+    void fetchPromptPreview(draftApiBase, draftMemoryUserId)
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        setPromptPreview({
+          loading: false,
+          error: "",
+          statelessPrompt: typeof data.stateless_prompt === "string" ? data.stateless_prompt : "",
+          memoryPrompt: typeof data.memory_prompt === "string" ? data.memory_prompt : ""
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setPromptPreview({
+          loading: false,
+          error: getErrorMessage(error),
+          statelessPrompt: "",
+          memoryPrompt: ""
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, draftApiBase, draftMemoryUserId]);
 
   useEffect(() => {
     if (currentView === "skills") {
@@ -1112,6 +1167,7 @@ export default function App() {
                 element={
                   <SettingsWorkspace
                     apiBase={draftApiBase}
+                    agentPromptAppend={draftAgentPromptAppend}
                     brandTitle={draftBrandTitle}
                     brandSubtitle={draftBrandSubtitle}
                     health={health}
@@ -1119,9 +1175,11 @@ export default function App() {
                     maxTokens={draftMaxTokens}
                     memoryUserId={draftMemoryUserId}
                     modelId={draftModelId}
+                    promptPreview={promptPreview}
                     temperature={draftTemperature}
                     topP={draftTopP}
                     onApiBaseChange={setDraftApiBase}
+                    onAgentPromptAppendChange={setDraftAgentPromptAppend}
                     onMaxIterationsChange={setDraftMaxIterations}
                     onMaxTokensChange={setDraftMaxTokens}
                     onBrandSubtitleChange={setDraftBrandSubtitle}
@@ -1133,6 +1191,7 @@ export default function App() {
                       setDraftBrandTitle(DEFAULT_SETTINGS.brandTitle);
                       setDraftBrandSubtitle(DEFAULT_SETTINGS.brandSubtitle);
                       setDraftMemoryUserId(DEFAULT_SETTINGS.memoryUserId);
+                      setDraftAgentPromptAppend(DEFAULT_SETTINGS.agentPromptAppend);
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
                       setDraftTemperature(DEFAULT_SETTINGS.temperature);
                       setDraftMaxTokens(DEFAULT_SETTINGS.maxTokens);
@@ -1147,6 +1206,7 @@ export default function App() {
                           brandTitle: draftBrandTitle.trim() || DEFAULT_SETTINGS.brandTitle,
                           brandSubtitle: draftBrandSubtitle.trim() || DEFAULT_SETTINGS.brandSubtitle,
                           memoryUserId: draftMemoryUserId.trim() || DEFAULT_SETTINGS.memoryUserId,
+                          agentPromptAppend: draftAgentPromptAppend.trim(),
                           modelId: draftModelId.trim(),
                           temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
                           maxTokens: normalizeOptionalNumericSetting(draftMaxTokens, "Max Tokens", "int", 1),
@@ -1580,22 +1640,40 @@ function renderProcessItem(item: ProcessItem, index: number) {
 
 function renderAssistantMessageContent(message: DisplayMessage, makeDownloadUrl: (file: OutputFile) => string) {
   const downloads = collectDownloadFiles(message);
-  const streamingText = message.text.replace(/<think>[\s\S]*?<\/think>/g, "").replace(/<\/?think>/g, "");
+  const streamingText = stripThinkingContent(message.text);
+  const hasVisibleStreamingText = Boolean(streamingText.trim());
   const parsedParts = parseThinking(message.text);
   const thinkingParts = parsedParts
     .filter((part) => part.type === "thinking" && part.content.trim())
     .map((part) => part.content.trim());
+  const hasThinkingActivity = thinkingParts.length > 0 || message.text.includes("<think>");
   const replyParts = parsedParts
     .filter((part) => part.type === "text" && part.content.trim())
     .map((part) => part.content);
   return (
     <>
-      {message.processing && !streamingText ? <div className="processing">Agent 正在处理</div> : null}
-      {message.processing && streamingText ? (
-        <div
-          className="plain-text reply-streaming"
-          dangerouslySetInnerHTML={{ __html: escapeWithLineBreaks(streamingText) }}
-        />
+      {message.processing ? (
+        <>
+          {hasThinkingActivity ? (
+            <div className="fold-card thinking thinking-pending">
+              <div className="thinking-status-header">
+                <span>{thinkingParts.length > 1 ? `思考过程 (${thinkingParts.length} 段已记录)` : "思考过程"}</span>
+                <span>运行中</span>
+              </div>
+              <div className="fold-card-body">
+                <div className="processing">Agent 正在思考</div>
+                <div className="thinking-status-note">思考内容会在本轮回答完成后折叠展示。</div>
+              </div>
+            </div>
+          ) : null}
+          {!hasThinkingActivity && !hasVisibleStreamingText ? <div className="processing">Agent 正在处理</div> : null}
+          {hasVisibleStreamingText ? (
+            <div
+              className="plain-text reply-streaming"
+              dangerouslySetInnerHTML={{ __html: escapeWithLineBreaks(streamingText) }}
+            />
+          ) : null}
+        </>
       ) : (
         <>
           {thinkingParts.length ? (
@@ -2036,16 +2114,19 @@ function SkillsWorkspace(props: {
 
 function SettingsWorkspace(props: {
   apiBase: string;
+  agentPromptAppend: string;
   brandTitle: string;
   brandSubtitle: string;
   health: HealthState;
   memoryUserId: string;
   modelId: string;
+  promptPreview: PromptPreviewState;
   temperature: string;
   maxTokens: string;
   maxIterations: string;
   topP: string;
   onApiBaseChange: (value: string) => void;
+  onAgentPromptAppendChange: (value: string) => void;
   onBrandTitleChange: (value: string) => void;
   onBrandSubtitleChange: (value: string) => void;
   onMemoryUserIdChange: (value: string) => void;
@@ -2060,6 +2141,7 @@ function SettingsWorkspace(props: {
 }) {
   const {
     apiBase,
+    agentPromptAppend,
     brandTitle,
     brandSubtitle,
     health,
@@ -2067,9 +2149,11 @@ function SettingsWorkspace(props: {
     maxTokens,
     memoryUserId,
     modelId,
+    promptPreview,
     temperature,
     topP,
     onApiBaseChange,
+    onAgentPromptAppendChange,
     onMaxIterationsChange,
     onMaxTokensChange,
     onBrandSubtitleChange,
@@ -2111,6 +2195,11 @@ function SettingsWorkspace(props: {
           <span>默认用户 ID</span>
           <input onChange={(event) => onMemoryUserIdChange(event.target.value)} placeholder={DEFAULT_MEMORY_USER_ID} value={memoryUserId} />
           <small>记忆对话和私有 skills 共用这个 user_id；留空时会回退到默认值 {DEFAULT_MEMORY_USER_ID}。</small>
+        </label>
+        <label className="field">
+          <span>Agent 提示词追加项</span>
+          <textarea onChange={(event) => onAgentPromptAppendChange(event.target.value)} placeholder="补充对主 agent 的长期指令，例如输出风格、回答约束、固定流程。" value={agentPromptAppend} />
+          <small>这段内容会追加在后端默认系统提示词之后，不会覆盖现有默认规则。</small>
         </label>
         <div className="section-head">
           <div>
@@ -2183,12 +2272,40 @@ function SettingsWorkspace(props: {
             <p>Temp {temperature || "默认"} · Max {maxTokens || "默认"} · Iter {maxIterations || "默认"} · Top P {topP || "默认"}</p>
           </article>
           <article className="stat-card">
+            <div className="soft-chip">Prompt Addendum</div>
+            <h3>{agentPromptAppend.trim() ? "已配置" : "未配置"}</h3>
+            <p>{agentPromptAppend.trim() ? "会追加到默认系统提示词后面" : "当前仅使用后端默认系统提示词"}</p>
+          </article>
+          <article className="stat-card">
             <div className="soft-chip">Storage</div>
             <h3>LocalStorage</h3>
             <p>设置、聊天记录和 skills 草稿都保存在当前浏览器。</p>
           </article>
         </div>
         <div className="empty-block">如果你把前端部署到独立域名，目标后端需要允许对应的 CORS 来源；否则浏览器会阻止跨域请求。</div>
+      </section>
+
+      <section className="panel settings-card">
+        <div className="section-head">
+          <div>
+            <h3>当前默认提示词预览</h3>
+            <span>展示后端当前生成的系统提示词。记忆模式会基于默认用户 ID 合并 USER.md 和 MEMORY.md。</span>
+          </div>
+        </div>
+        {promptPreview.loading ? <div className="processing">正在加载提示词预览</div> : null}
+        {promptPreview.error ? <div className="empty-block">提示词预览加载失败：{promptPreview.error}</div> : null}
+        {!promptPreview.loading && !promptPreview.error ? (
+          <div className="form-grid">
+            <label className="field">
+              <span>无痕流式默认提示词</span>
+              <textarea readOnly value={promptPreview.statelessPrompt} />
+            </label>
+            <label className="field">
+              <span>记忆流式默认提示词</span>
+              <textarea readOnly value={promptPreview.memoryPrompt} />
+            </label>
+          </div>
+        ) : null}
       </section>
     </div>
   );
@@ -2211,5 +2328,33 @@ async function testHealth(apiBase: string) {
     }
     throw new Error(message);
   }
+  return await response.json() as Record<string, unknown>;
+}
+
+async function fetchPromptPreview(apiBase: string, userId: string) {
+  const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
+  const params = new URLSearchParams();
+  const trimmedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+  if (trimmedUserId) {
+    params.set("user_id", trimmedUserId);
+  }
+
+  const response = await fetch(`${target}/agent/system-prompt?${params.toString()}`);
+  if (!response.ok) {
+    let message = `请求失败 (${response.status})`;
+    try {
+      const data = await response.json() as Record<string, unknown>;
+      if (typeof data.detail === "string") {
+        message = data.detail;
+      }
+    } catch {
+      const text = await response.text();
+      if (text) {
+        message = text;
+      }
+    }
+    throw new Error(message);
+  }
+
   return await response.json() as Record<string, unknown>;
 }

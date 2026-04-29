@@ -137,24 +137,49 @@ export function suggestFolder(value: string) {
 }
 
 export function parseThinking(text: string) {
-  const regex = /<think>([\s\S]*?)<\/think>/g;
   const parts: Array<{ type: "thinking" | "text"; content: string }> = [];
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
+  let cursor = 0;
+  let segmentStart = 0;
+  let inThinking = false;
 
-  while ((match = regex.exec(text)) !== null) {
-    if (match.index > lastIndex) {
-      parts.push({ type: "text", content: text.slice(lastIndex, match.index) });
+  while (cursor < text.length) {
+    if (!inThinking && text.startsWith("<think>", cursor)) {
+      if (cursor > segmentStart) {
+        parts.push({ type: "text", content: text.slice(segmentStart, cursor) });
+      }
+      inThinking = true;
+      cursor += "<think>".length;
+      segmentStart = cursor;
+      continue;
     }
-    parts.push({ type: "thinking", content: match[1].trim() });
-    lastIndex = match.index + match[0].length;
+
+    if (inThinking && text.startsWith("</think>", cursor)) {
+      parts.push({ type: "thinking", content: text.slice(segmentStart, cursor).trim() });
+      inThinking = false;
+      cursor += "</think>".length;
+      segmentStart = cursor;
+      continue;
+    }
+
+    cursor += 1;
   }
 
-  if (lastIndex < text.length) {
-    parts.push({ type: "text", content: text.slice(lastIndex) });
+  if (!inThinking && segmentStart < text.length) {
+    parts.push({ type: "text", content: text.slice(segmentStart) });
   }
 
-  return parts.length ? parts : [{ type: "text", content: text }];
+  if (parts.length) {
+    return parts;
+  }
+
+  return inThinking ? [] : [{ type: "text", content: text }];
+}
+
+export function stripThinkingContent(text: string) {
+  return parseThinking(text)
+    .filter((part) => part.type === "text")
+    .map((part) => part.content)
+    .join("");
 }
 
 export function renderMarkdown(markdown: string) {
@@ -234,6 +259,7 @@ export function buildFormData(
   if (config.memory) {
     formData.append("user_id", settings.memoryUserId.trim() || config.userId || DEFAULT_MEMORY_USER_ID);
   }
+  appendOptionalFormData(formData, "system_append", settings.agentPromptAppend);
   appendOptionalFormData(formData, "model_id", settings.modelId);
   appendOptionalFormData(formData, "temperature", settings.temperature);
   appendOptionalFormData(formData, "max_tokens", settings.maxTokens);

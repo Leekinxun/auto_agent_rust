@@ -78,6 +78,7 @@ export type AppSettings = {
   brandTitle: string;
   brandSubtitle: string;
   memoryUserId: string;
+  agentPromptAppend: string;
   modelId: string;
   temperature: string;
   maxTokens: string;

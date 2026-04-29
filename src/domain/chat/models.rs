@@ -36,10 +36,17 @@ pub struct ChatRequest {
     pub message: String,
     pub history: Vec<HistoryEntry>,
     pub system: Option<String>,
+    pub system_append: Option<String>,
     pub session_id: Option<String>,
     pub user_id: Option<String>,
     pub files: Vec<UploadedFile>,
     pub llm_overrides: LlmOverrides,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SystemPromptPreview {
+    pub stateless_prompt: String,
+    pub memory_prompt: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

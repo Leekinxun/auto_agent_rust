@@ -15,6 +15,7 @@ use crate::domain::chat::compaction::{
 };
 use crate::domain::chat::models::{
     ChatEvent, ChatMode, ChatRequest, ChatResult, HistoryEntry, OutputFile, SkillUsage,
+    SystemPromptPreview,
 };
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::{SessionContext, SessionService};
@@ -413,9 +414,10 @@ impl ChatOrchestrator {
             .as_deref()
             .map(|session_id| self.session_service.get_or_create(session_id))
             .transpose()?;
-        let base_system = request
+        let mut base_system = request
             .system
             .unwrap_or_else(|| self.build_system(request.user_id.as_deref()));
+        base_system = append_system_instruction(base_system, request.system_append.as_deref());
 
         let system_prompt = if matches!(mode, ChatMode::Memory) {
             let snapshot = request
@@ -447,6 +449,24 @@ impl ChatOrchestrator {
             session,
             user_id: request.user_id,
             llm_overrides: request.llm_overrides,
+        })
+    }
+
+    pub fn preview_system_prompts(&self, user_id: Option<&str>) -> Result<SystemPromptPreview> {
+        let normalized_user_id = user_id.map(str::trim).filter(|value| !value.is_empty());
+        let stateless_prompt = self.build_system(None);
+        let memory_base_prompt = self.build_system(normalized_user_id);
+        let memory_prompt = if let Some(user_id) = normalized_user_id {
+            let snapshot = self.memory_service.load_snapshot(user_id)?;
+            self.memory_service
+                .build_user_memory_system(&memory_base_prompt, Some(&snapshot))
+        } else {
+            memory_base_prompt
+        };
+
+        Ok(SystemPromptPreview {
+            stateless_prompt,
+            memory_prompt,
         })
     }
 
@@ -1066,6 +1086,19 @@ fn build_subagent_initial_messages(prompt: &str) -> Vec<ChatMessage> {
     ]
 }
 
+fn append_system_instruction(base_system: String, system_append: Option<&str>) -> String {
+    let Some(system_append) = system_append
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return base_system;
+    };
+
+    format!(
+        "{base_system}\n\n<custom_agent_instruction>\nUser-configured supplemental instruction. Follow it unless it conflicts with higher-priority system constraints or tool safety rules.\n{system_append}\n</custom_agent_instruction>"
+    )
+}
+
 fn resolve_max_iterations(
     overrides: &crate::domain::chat::models::LlmOverrides,
     default_max_iterations: usize,
@@ -1229,8 +1262,9 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMode, build_missing_reply_recovery_prompt, build_subagent_initial_messages,
-        log_final_reply, resolve_max_iterations, static_public_tool_schemas,
+        ChatMode, append_system_instruction, build_missing_reply_recovery_prompt,
+        build_subagent_initial_messages, log_final_reply, resolve_max_iterations,
+        static_public_tool_schemas,
     };
     use crate::domain::chat::models::LlmOverrides;
     use std::collections::HashSet;
@@ -1361,6 +1395,17 @@ mod tests {
             ),
             12
         );
+    }
+
+    #[test]
+    fn appends_custom_system_instruction_in_wrapped_block() {
+        let prompt = append_system_instruction(
+            "base prompt".to_string(),
+            Some("Always summarize risks first."),
+        );
+        assert!(prompt.contains("base prompt"));
+        assert!(prompt.contains("<custom_agent_instruction>"));
+        assert!(prompt.contains("Always summarize risks first."));
     }
 
     #[derive(Clone, Default)]
