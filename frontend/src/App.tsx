@@ -1464,7 +1464,13 @@ function ChatWorkspace(props: {
               disabled={chat.sending}
               onChange={(event) => onInputChange(event.target.value)}
               onKeyDown={(event) => {
-                if (event.key === "Enter" && !event.shiftKey) {
+                if (event.key !== "Enter") {
+                  return;
+                }
+                if (event.nativeEvent.isComposing || event.keyCode === 229) {
+                  return;
+                }
+                if (event.ctrlKey || event.metaKey) {
                   event.preventDefault();
                   handleSend();
                 }
@@ -1472,6 +1478,7 @@ function ChatWorkspace(props: {
               placeholder={config.placeholder}
               value={chat.input}
             />
+            <div className="helper-text composer-hint">`Enter` 换行，`Ctrl/Cmd + Enter` 发送</div>
 
             <div className="composer-actions">
               <div className="button-row">

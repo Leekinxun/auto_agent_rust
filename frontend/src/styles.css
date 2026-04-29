@@ -718,6 +718,12 @@ button {
     position: relative;
     color: var(--text);
     line-height: 1.78;
+    max-height: min(46vh, 420px);
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding-right: 8px;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
 }
 
 .reply-streaming::after {
@@ -1180,6 +1186,10 @@ button {
     padding: 16px 18px;
     line-height: 1.65;
     font-size: 15px;
+}
+
+.composer-hint {
+    margin-top: -2px;
 }
 
 .composer-actions,
