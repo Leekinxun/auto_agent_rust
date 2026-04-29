@@ -349,6 +349,12 @@ fn write_memory_file(
     } else {
         store.write_memory_md(user_id, &normalized)?;
     }
+    tracing::info!(
+        user_id,
+        target = label,
+        chars = normalized.len(),
+        "memory file updated"
+    );
     Ok(format!(
         "{label} updated ({}/{limit} chars).",
         normalized.len()
@@ -376,4 +382,111 @@ fn clip_text(text: &str, limit: usize) -> String {
     }
     let clipped = text.chars().take(limit).collect::<String>();
     format!("{}\n...[truncated]", clipped.trim_end())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::write_memory_file;
+    use crate::config::model::FileMemoryConfig;
+    use crate::infra::fs::user_memory_store::FileMemoryStore;
+    use std::fs;
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRepo {
+        root: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let unique = format!(
+                "auto-claude-memory-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time before unix epoch")
+                    .as_nanos()
+            );
+            let root = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&root).expect("create temp repo");
+            Self { root }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(self.buffer.lock().expect("writer lock poisoned").clone())
+                .expect("writer output is valid utf-8")
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    struct SharedWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("writer lock poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn logs_when_user_memory_file_is_updated() {
+        let repo = TestRepo::new();
+        let store = FileMemoryStore::new(repo.root.clone(), FileMemoryConfig::default());
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            write_memory_file(
+                &store,
+                "demo-user",
+                "USER.md",
+                "- prefers concise answers",
+                1375,
+                true,
+            )
+            .expect("memory file write succeeds");
+        });
+
+        let output = writer.contents();
+        assert!(output.contains("memory file updated"));
+        assert!(output.contains("demo-user"));
+        assert!(output.contains("USER.md"));
+    }
 }

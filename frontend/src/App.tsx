@@ -10,6 +10,7 @@ import type {
   HistoryEntry,
   OutputFile,
   ProcessItem,
+  QueuedChatSubmission,
   SkillEditorState,
   SkillItem,
   SkillScope,
@@ -48,6 +49,11 @@ type PromptPreviewState = {
   error: string;
   statelessPrompt: string;
   memoryPrompt: string;
+};
+
+type ChatTurnResult = {
+  reply: string;
+  aborted: boolean;
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -389,6 +395,11 @@ export default function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [health, setHealth] = useState<HealthState>({ tone: "loading", label: "连接中..." });
   const [chats, setChats] = useState<Record<ChatModeId, ChatState>>(createInitialChats);
+  const chatsRef = useRef<Record<ChatModeId, ChatState>>(chats);
+  const activeStreamControllersRef = useRef<Record<ChatModeId, AbortController | null>>({
+    stream: null,
+    memoryStream: null
+  });
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [skillScope, setSkillScope] = useState<SkillScope>(loadSkillScope);
   const [skillsLoading, setSkillsLoading] = useState(false);
@@ -428,6 +439,10 @@ export default function App() {
   useEffect(() => {
     window.localStorage.removeItem("auto_claude_code_frontend_chats_v1");
   }, []);
+
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
 
   useEffect(() => {
     window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? "1" : "0");
@@ -591,8 +606,16 @@ export default function App() {
     }
   }
 
+  function replaceChats(updater: (current: Record<ChatModeId, ChatState>) => Record<ChatModeId, ChatState>) {
+    setChats((current) => {
+      const next = updater(current);
+      chatsRef.current = next;
+      return next;
+    });
+  }
+
   function updateChat(mode: ChatModeId, updater: (chat: ChatState) => ChatState) {
-    setChats((current) => ({
+    replaceChats((current) => ({
       ...current,
       [mode]: updater(current[mode])
     }));
@@ -612,22 +635,79 @@ export default function App() {
     }));
   }
 
-  async function sendChat(mode: ChatModeId) {
-    const chat = chats[mode];
-    const config = CHAT_MODES[mode];
-    const message = chat.input.trim();
+  function takeNextQueuedSubmission(mode: ChatModeId) {
+    let nextSubmission: QueuedChatSubmission | null = null;
+    replaceChats((current) => {
+      const [first, ...rest] = current[mode].queue;
+      nextSubmission = first ?? null;
+      if (!first) {
+        return current;
+      }
+      return {
+        ...current,
+        [mode]: {
+          ...current[mode],
+          queue: rest
+        }
+      };
+    });
+    return nextSubmission;
+  }
 
-    if (!message || chat.sending) {
+  function stopChat(mode: ChatModeId) {
+    const controller = activeStreamControllersRef.current[mode];
+    if (!controller || controller.signal.aborted) {
       return;
     }
 
-    const files = [...chat.files];
+    updateChat(mode, (current) => ({
+      ...current,
+      stopRequested: true
+    }));
+    controller.abort();
+  }
+
+  function sendChat(mode: ChatModeId) {
+    const chat = chatsRef.current[mode];
+    const message = chat.input.trim();
+
+    if (!message) {
+      return;
+    }
+
+    const submission: QueuedChatSubmission = {
+      id: createId("queued"),
+      message,
+      files: [...chat.files]
+    };
+
+    if (chat.sending) {
+      updateChat(mode, (current) => ({
+        ...current,
+        input: "",
+        files: [],
+        queue: [...current.queue, submission]
+      }));
+      return;
+    }
+
+    updateChat(mode, (current) => ({
+      ...current,
+      input: "",
+      files: []
+    }));
+
+    void runChatSubmission(mode, submission);
+  }
+
+  async function runChatSubmission(mode: ChatModeId, submission: QueuedChatSubmission) {
+    const config = CHAT_MODES[mode];
     const assistantId = createId("assistant");
     const userMessage: DisplayMessage = {
       id: createId("user"),
       role: "user",
-      text: message,
-      attachments: files.map((file) => file.name),
+      text: submission.message,
+      attachments: submission.files.map((file) => file.name),
       processing: false,
       outputFiles: [],
       processItems: []
@@ -644,17 +724,43 @@ export default function App() {
 
     updateChat(mode, (current) => ({
       ...current,
-      input: "",
-      files: [],
       sending: true,
+      stopRequested: false,
       messages: [...current.messages, userMessage, assistantMessage]
     }));
 
     try {
+      const history = chatsRef.current[mode].history;
+      let result: ChatTurnResult;
+
       if (config.streaming) {
-        await sendStreamingChat(config, chat.history, message, files, assistantId);
+        const controller = new AbortController();
+        activeStreamControllersRef.current[mode] = controller;
+        result = await sendStreamingChat(
+          config,
+          history,
+          submission.message,
+          submission.files,
+          assistantId,
+          controller.signal
+        );
       } else {
-        await sendSyncChat(config, chat.history, message, files, assistantId);
+        result = await sendSyncChat(config, history, submission.message, submission.files, assistantId);
+      }
+
+      if (!result.aborted || result.reply.trim()) {
+        updateChat(mode, (current) => ({
+          ...current,
+          history: [
+            ...current.history,
+            { role: "user", content: submission.message },
+            { role: "assistant", content: result.reply }
+          ]
+        }));
+      }
+
+      if (result.aborted) {
+        showToast("已停止当前回答", "info");
       }
     } catch (error) {
       patchMessage(mode, assistantId, (current) => ({
@@ -666,10 +772,16 @@ export default function App() {
       }));
       showToast(getErrorMessage(error), "error");
     } finally {
+      activeStreamControllersRef.current[mode] = null;
       updateChat(mode, (current) => ({
         ...current,
-        sending: false
+        sending: false,
+        stopRequested: false
       }));
+      const nextSubmission = takeNextQueuedSubmission(mode);
+      if (nextSubmission) {
+        void runChatSubmission(mode, nextSubmission);
+      }
     }
   }
 
@@ -679,7 +791,7 @@ export default function App() {
     message: string,
     files: File[],
     assistantId: string
-  ) {
+  ): Promise<ChatTurnResult> {
     const data = await fetchJson(config.endpoint, {
       method: "POST",
       body: buildFormData(config, history, message, files, settings)
@@ -702,14 +814,7 @@ export default function App() {
       showToast(`已更新 ${data.skills_updated.length} 个私有 skill`, "success");
     }
 
-    updateChat(config.id, (current) => ({
-      ...current,
-      history: [
-        ...current.history,
-        { role: "user", content: message },
-        { role: "assistant", content: reply }
-      ]
-    }));
+    return { reply, aborted: false };
   }
 
   async function sendStreamingChat(
@@ -717,18 +822,15 @@ export default function App() {
     history: HistoryEntry[],
     message: string,
     files: File[],
-    assistantId: string
-  ) {
-    const response = await fetchResponse(config.endpoint, {
-      method: "POST",
-      body: buildFormData(config, history, message, files, settings)
-    });
-
+    assistantId: string,
+    signal: AbortSignal
+  ): Promise<ChatTurnResult> {
     let fullReply = "";
     let pendingText = "";
     let revealTimer: number | null = null;
     let streamError: string | null = null;
     let finishReason = "stop";
+    let aborted = false;
 
     const flushPendingText = () => {
       if (!pendingText) {
@@ -762,6 +864,11 @@ export default function App() {
     };
 
     try {
+      const response = await fetchResponse(config.endpoint, {
+        method: "POST",
+        body: buildFormData(config, history, message, files, settings),
+        signal
+      });
       await readEventStream(response, (eventName, payload) => {
         if (eventName === "text" && typeof payload.text === "string") {
           fullReply += payload.text;
@@ -813,6 +920,13 @@ export default function App() {
           appendProcessItem(config.id, assistantId, { event: "error", detail: streamError });
         }
       });
+    } catch (error) {
+      if (isAbortError(error)) {
+        aborted = true;
+        finishReason = "user_stopped";
+      } else {
+        throw error;
+      }
     } finally {
       await waitForRevealDrain();
       if (revealTimer !== null) {
@@ -824,24 +938,21 @@ export default function App() {
       throw new Error(streamError);
     }
 
+    if (aborted) {
+      appendProcessItem(config.id, assistantId, { event: "done", finish_reason: finishReason });
+    }
+
     patchMessage(config.id, assistantId, (current) => ({
       ...current,
-      text: fullReply,
+      text: fullReply || (aborted ? "已停止当前回答。" : ""),
       processing: false
     }));
 
-    if (finishReason !== "stop") {
+    if (!aborted && finishReason !== "stop") {
       showToast(`流式响应结束：${describeFinishReason(finishReason)}`, "info");
     }
 
-    updateChat(config.id, (current) => ({
-      ...current,
-      history: [
-        ...current.history,
-        { role: "user", content: message },
-        { role: "assistant", content: fullReply }
-      ]
-    }));
+    return { reply: fullReply, aborted };
   }
 
   async function saveSkill() {
@@ -952,7 +1063,7 @@ export default function App() {
         config={CHAT_MODES[mode]}
         currentUserId={skillUserId}
         makeDownloadUrl={(file) => buildDownloadUrl(settings.apiBase, file)}
-        onClear={() => setChats((current) => ({ ...current, [mode]: createInitialChats()[mode] }))}
+        onClear={() => replaceChats((current) => ({ ...current, [mode]: createInitialChats()[mode] }))}
         onInputChange={(value) => updateChat(mode, (current) => ({ ...current, input: value }))}
         onRemoveFile={(index) => updateChat(mode, (current) => ({
           ...current,
@@ -962,7 +1073,8 @@ export default function App() {
           ...current,
           files: [...current.files, ...files]
         }))}
-        onSend={() => void sendChat(mode)}
+        onSend={() => sendChat(mode)}
+        onStop={() => stopChat(mode)}
       />
     );
   }
@@ -1257,10 +1369,11 @@ function ChatWorkspace(props: {
   onSelectFiles: (files: File[]) => void;
   onRemoveFile: (index: number) => void;
   onSend: () => void;
+  onStop: () => void;
   onClear: () => void;
   makeDownloadUrl: (file: OutputFile) => string;
 }) {
-  const { chat, config, currentUserId, onClear, onInputChange, onRemoveFile, onSelectFiles, onSend, makeDownloadUrl } = props;
+  const { chat, config, currentUserId, onClear, onInputChange, onRemoveFile, onSelectFiles, onSend, onStop, makeDownloadUrl } = props;
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isComposingRef = useRef(false);
@@ -1369,7 +1482,7 @@ function ChatWorkspace(props: {
   }, [chat.messages]);
 
   const handleSend = () => {
-    if (!chat.input.trim() || chat.sending) {
+    if (!chat.input.trim()) {
       return;
     }
 
@@ -1394,6 +1507,7 @@ function ChatWorkspace(props: {
 
   const showUnreadAccent = hasScrollButtonUnreadAccent(hasUnreadUpdates, unreadTurnCount);
   const scrollButtonLabel = getScrollButtonLabel(hasUnreadUpdates, unreadTurnCount);
+  const queuedPreview = chat.queue[0]?.message.trim() || "";
 
   return (
     <div className="chat-page">
@@ -1437,6 +1551,19 @@ function ChatWorkspace(props: {
             </div>
           ) : null}
           <div className="composer">
+            {chat.sending || chat.queue.length ? (
+              <div className="composer-status-row">
+                {chat.sending ? (
+                  <span className={`soft-chip ${chat.stopRequested ? "soft-chip-attention" : ""}`}>
+                    {chat.stopRequested ? "正在停止当前回答..." : "正在回答中，可继续提问"}
+                  </span>
+                ) : null}
+                {chat.queue.length ? (
+                  <span className="soft-chip">已排队 {chat.queue.length} 条，当前回答结束后自动继续</span>
+                ) : null}
+                {queuedPreview ? <span className="composer-queue-preview">下一条：{queuedPreview}</span> : null}
+              </div>
+            ) : null}
             <input
               accept=".doc,.docx,.csv,.xlsx,.xls,.txt,.pdf"
               hidden
@@ -1462,7 +1589,6 @@ function ChatWorkspace(props: {
             ) : null}
 
             <textarea
-              disabled={chat.sending}
               onChange={(event) => onInputChange(event.target.value)}
               onCompositionEnd={() => {
                 isComposingRef.current = false;
@@ -1486,16 +1612,25 @@ function ChatWorkspace(props: {
               placeholder={config.placeholder}
               value={chat.input}
             />
-            <div className="helper-text composer-hint">`Enter` 发送，`Shift + Enter` 换行；输入法联想期间不会误发</div>
+            <div className="helper-text composer-hint">
+              {chat.sending
+                ? "`Enter` 可继续加入队列，`Shift + Enter` 换行；输入法联想期间不会误发"
+                : "`Enter` 发送，`Shift + Enter` 换行；输入法联想期间不会误发"}
+            </div>
 
             <div className="composer-actions">
               <div className="button-row">
                 <button className="button secondary" onClick={() => fileInputRef.current?.click()} type="button">附件</button>
-                <button className="button ghost" onClick={handleClear} type="button">清空</button>
+                <button className="button ghost" disabled={chat.sending} onClick={handleClear} type="button">清空</button>
               </div>
               <div className="button-row">
-                <button className="button primary" disabled={chat.sending} onClick={handleSend} type="button">
-                  {chat.sending ? "处理中..." : "发送"}
+                {chat.sending ? (
+                  <button className="button danger" disabled={chat.stopRequested} onClick={onStop} type="button">
+                    {chat.stopRequested ? "停止中..." : "停止"}
+                  </button>
+                ) : null}
+                <button className="button primary" disabled={!chat.input.trim()} onClick={handleSend} type="button">
+                  发送
                 </button>
               </div>
             </div>
@@ -1523,12 +1658,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isAbortError(error: unknown) {
+  return isRecord(error) && error.name === "AbortError";
+}
+
 function describeFinishReason(finishReason: string) {
   switch (finishReason) {
     case "max_iterations":
       return "达到最大工具/推理轮次上限";
     case "length":
       return "输出达到模型长度上限";
+    case "user_stopped":
+      return "用户手动停止";
     case "stop":
       return "正常结束";
     case "tool_calls":

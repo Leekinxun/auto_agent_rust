@@ -60,12 +60,20 @@ export type DisplayMessage = {
   processItems: ProcessItem[];
 };
 
+export type QueuedChatSubmission = {
+  id: string;
+  message: string;
+  files: File[];
+};
+
 export type ChatState = {
   history: HistoryEntry[];
   messages: DisplayMessage[];
   files: File[];
   input: string;
   sending: boolean;
+  stopRequested: boolean;
+  queue: QueuedChatSubmission[];
 };
 
 export type HealthState = {

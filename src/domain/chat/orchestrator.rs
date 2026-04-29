@@ -201,6 +201,10 @@ impl ChatOrchestrator {
         let mut rounds_without_todo = 0usize;
 
         for _ in 0..max_iterations {
+            if sender.is_closed() {
+                tracing::info!("stream receiver closed before next iteration");
+                return Ok(());
+            }
             microcompact(&mut messages);
             if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                 messages =
@@ -220,7 +224,17 @@ impl ChatOrchestrator {
             let mut round_text = String::new();
             let mut finish_reason = "stop".to_string();
 
-            while let Some(chunk) = stream.next().await {
+            loop {
+                let chunk = tokio::select! {
+                    _ = sender.closed() => {
+                        tracing::info!("stream receiver closed during llm stream");
+                        return Ok(());
+                    }
+                    chunk = stream.next() => chunk,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
                 let bytes = chunk.context("failed to read llm stream chunk")?;
                 buffer.push_str(
                     std::str::from_utf8(&bytes).context("llm stream returned invalid utf-8")?,
@@ -240,7 +254,11 @@ impl ChatOrchestrator {
                                 if !content.is_empty() {
                                     round_text.push_str(&content);
                                     full_reply.push_str(&content);
-                                    let _ = sender.send(ChatEvent::Text(content)).await;
+                                    if !try_send_stream_event(&sender, ChatEvent::Text(content))
+                                        .await
+                                    {
+                                        return Ok(());
+                                    }
                                 }
                             }
                             for delta in choice.delta.tool_calls {
@@ -284,18 +302,22 @@ impl ChatOrchestrator {
                     {
                         full_reply = recovered_reply.clone();
                         finish_reason = "stop".to_string();
-                        let _ = sender.send(ChatEvent::Text(recovered_reply)).await;
+                        if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
+                            return Ok(());
+                        }
                     } else {
                         let detail = build_empty_stream_reply_error(&finish_reason, max_iterations);
                         tracing::warn!(finish_reason, "stream ended without visible reply");
-                        let _ = sender.send(ChatEvent::Error { detail }).await;
+                        let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
                         return Ok(());
                     }
                 }
 
                 let output_files = extract_output_files(&self.repo_root, &full_reply);
                 if !output_files.is_empty() {
-                    let _ = sender.send(ChatEvent::OutputFiles(output_files)).await;
+                    if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files)).await {
+                        return Ok(());
+                    }
                 }
                 self.spawn_stream_memory_side_effects(
                     &mode,
@@ -312,18 +334,23 @@ impl ChatOrchestrator {
                     &finish_reason,
                     &full_reply,
                 );
-                let _ = sender.send(ChatEvent::Done { finish_reason }).await;
+                let _ = try_send_stream_event(&sender, ChatEvent::Done { finish_reason }).await;
                 return Ok(());
             }
 
             let mut compress_requested = false;
             for tool_call in &tool_calls {
-                let _ = sender
-                    .send(ChatEvent::ToolUse {
+                if !try_send_stream_event(
+                    &sender,
+                    ChatEvent::ToolUse {
                         name: tool_call.function.name.clone(),
                         arguments: tool_call.function.arguments.clone(),
-                    })
-                    .await;
+                    },
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 let result = self
                     .dispatch_public_tool(
                         &tool_call,
@@ -337,12 +364,17 @@ impl ChatOrchestrator {
                     compress_requested = true;
                 }
                 let preview = truncate_for_preview(&result, 2_000);
-                let _ = sender
-                    .send(ChatEvent::ToolResult {
+                if !try_send_stream_event(
+                    &sender,
+                    ChatEvent::ToolResult {
                         tool: tool_call.function.name.clone(),
                         output: preview,
-                    })
-                    .await;
+                    },
+                )
+                .await
+                {
+                    return Ok(());
+                }
                 messages.push(ChatMessage::tool(tool_call.id.clone(), result));
             }
 
@@ -367,23 +399,30 @@ impl ChatOrchestrator {
             {
                 full_reply = recovered_reply.clone();
                 final_finish_reason = "stop".to_string();
-                let _ = sender.send(ChatEvent::Text(recovered_reply)).await;
+                if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
+                    return Ok(());
+                }
             } else {
                 let detail = build_empty_stream_reply_error("max_iterations", max_iterations);
                 tracing::warn!(
                     max_iterations,
                     "stream exhausted iteration budget without visible reply"
                 );
-                let _ = sender.send(ChatEvent::Error { detail }).await;
+                let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
                 return Ok(());
             }
         }
 
-        let _ = sender
-            .send(ChatEvent::Done {
+        if !try_send_stream_event(
+            &sender,
+            ChatEvent::Done {
                 finish_reason: final_finish_reason.clone(),
-            })
-            .await;
+            },
+        )
+        .await
+        {
+            return Ok(());
+        }
         self.spawn_stream_memory_side_effects(
             &mode,
             prepared.session.clone(),
@@ -983,6 +1022,10 @@ impl ChatOrchestrator {
             );
         });
     }
+}
+
+async fn try_send_stream_event(sender: &mpsc::Sender<ChatEvent>, event: ChatEvent) -> bool {
+    sender.send(event).await.is_ok()
 }
 
 fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Value> {

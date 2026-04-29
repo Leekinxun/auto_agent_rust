@@ -6,6 +6,8 @@ describe("frontend chat surface", () => {
   it("only exposes the two streaming chat modes", () => {
     expect(Object.keys(CHAT_MODES)).toEqual(["stream", "memoryStream"]);
     expect(Object.keys(createInitialChats())).toEqual(["stream", "memoryStream"]);
+    expect(createInitialChats().stream.queue).toEqual([]);
+    expect(createInitialChats().stream.stopRequested).toBe(false);
   });
 
   it("keeps active view paths for the two streaming pages", () => {

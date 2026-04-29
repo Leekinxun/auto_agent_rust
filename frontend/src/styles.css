@@ -1133,6 +1133,28 @@ button {
     gap: 14px;
 }
 
+.composer-status-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.composer-queue-preview {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 12px;
+    border-radius: 999px;
+    background: rgba(24, 32, 27, 0.04);
+    color: var(--muted);
+    font-size: 12px;
+    max-width: min(100%, 520px);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 .composer-head,
 .section-head,
 .toolbar {

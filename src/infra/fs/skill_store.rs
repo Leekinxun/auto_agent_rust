@@ -134,6 +134,13 @@ impl FileSkillStore {
             .with_context(|| format!("failed to create {}", target_dir.display()))?;
         std::fs::write(&skill_path, render_frontmatter(&shared.meta, &shared.body))
             .with_context(|| format!("failed to write {}", skill_path.display()))?;
+        tracing::info!(
+            user_id,
+            skill = shared.name.as_str(),
+            source_scope = "shared",
+            path = %skill_path.display(),
+            "private skill created"
+        );
 
         self.get_item(name, SkillScope::Private, Some(user_id))
     }
@@ -157,6 +164,13 @@ impl FileSkillStore {
         let skill_path = PathBuf::from(&skill.path);
         std::fs::write(&skill_path, render_frontmatter(&skill.meta, normalized))
             .with_context(|| format!("failed to write {}", skill_path.display()))?;
+        tracing::info!(
+            user_id,
+            skill = skill.name.as_str(),
+            chars = normalized.len(),
+            path = %skill_path.display(),
+            "private skill updated"
+        );
 
         self.get_item(name, SkillScope::Private, Some(user_id))
     }
@@ -322,5 +336,126 @@ fn next_available_dir(root_dir: &Path, folder_name: &str) -> PathBuf {
             return candidate;
         }
         index += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::FileSkillStore;
+    use crate::config::model::FileMemoryConfig;
+    use crate::domain::skills::parser::render_frontmatter;
+    use crate::infra::fs::user_memory_store::FileMemoryStore;
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::{self, Write};
+    use std::path::PathBuf;
+    use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    struct TestRepo {
+        root: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let unique = format!(
+                "auto-claude-skill-store-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time before unix epoch")
+                    .as_nanos()
+            );
+            let root = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&root).expect("create temp repo");
+            Self { root }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct SharedWriter {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl SharedWriter {
+        fn contents(&self) -> String {
+            String::from_utf8(self.buffer.lock().expect("writer lock poisoned").clone())
+                .expect("writer output is valid utf-8")
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for SharedWriter {
+        type Writer = SharedWriterGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            SharedWriterGuard {
+                buffer: self.buffer.clone(),
+            }
+        }
+    }
+
+    struct SharedWriterGuard {
+        buffer: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl Write for SharedWriterGuard {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.buffer
+                .lock()
+                .expect("writer lock poisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn logs_when_private_skill_is_created_and_updated() {
+        let repo = TestRepo::new();
+        let shared_root = repo.root.join("skills");
+        let shared_skill_dir = shared_root.join("demo");
+        fs::create_dir_all(&shared_skill_dir).expect("create shared skill dir");
+
+        let mut meta = BTreeMap::new();
+        meta.insert("name".to_string(), "demo".to_string());
+        meta.insert("description".to_string(), "shared demo".to_string());
+        fs::write(
+            shared_skill_dir.join("SKILL.md"),
+            render_frontmatter(&meta, "# Demo\nshared body"),
+        )
+        .expect("write shared skill");
+
+        let memory_store = FileMemoryStore::new(repo.root.clone(), FileMemoryConfig::default());
+        let store = FileSkillStore::new(shared_root, memory_store);
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        tracing::subscriber::with_default(subscriber, || {
+            store
+                .ensure_private_skill_copy("demo-user", "demo")
+                .expect("create private skill");
+            store
+                .rewrite_private_skill_body("demo-user", "demo", "# Demo\nprivate body")
+                .expect("rewrite private skill body");
+        });
+
+        let output = writer.contents();
+        assert!(output.contains("private skill created"));
+        assert!(output.contains("private skill updated"));
+        assert!(output.contains("demo-user"));
+        assert!(output.contains("demo"));
     }
 }
