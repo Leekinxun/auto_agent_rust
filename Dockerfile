@@ -26,7 +26,7 @@ ENV SERVER_HOST=0.0.0.0 \
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=backend-builder /app/target/release/auto-claude-code-rs ./auto-claude-code-rs

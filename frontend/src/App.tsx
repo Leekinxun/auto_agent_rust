@@ -1263,6 +1263,7 @@ function ChatWorkspace(props: {
   const { chat, config, currentUserId, onClear, onInputChange, onRemoveFile, onSelectFiles, onSend, makeDownloadUrl } = props;
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const isComposingRef = useRef(false);
   const scrollContainerRef = useRef<ScrollContainer | null>(null);
   const shouldAutoFollowRef = useRef(true);
   const forceScrollRef = useRef(false);
@@ -1463,22 +1464,29 @@ function ChatWorkspace(props: {
             <textarea
               disabled={chat.sending}
               onChange={(event) => onInputChange(event.target.value)}
+              onCompositionEnd={() => {
+                isComposingRef.current = false;
+              }}
+              onCompositionStart={() => {
+                isComposingRef.current = true;
+              }}
               onKeyDown={(event) => {
                 if (event.key !== "Enter") {
                   return;
                 }
-                if (event.nativeEvent.isComposing || event.keyCode === 229) {
+                if (event.shiftKey) {
                   return;
                 }
-                if (event.ctrlKey || event.metaKey) {
-                  event.preventDefault();
-                  handleSend();
+                if (isComposingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) {
+                  return;
                 }
+                event.preventDefault();
+                handleSend();
               }}
               placeholder={config.placeholder}
               value={chat.input}
             />
-            <div className="helper-text composer-hint">`Enter` 换行，`Ctrl/Cmd + Enter` 发送</div>
+            <div className="helper-text composer-hint">`Enter` 发送，`Shift + Enter` 换行；输入法联想期间不会误发</div>
 
             <div className="composer-actions">
               <div className="button-row">

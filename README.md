@@ -156,5 +156,12 @@ docker run -d \
   - `LOG_DIR`
 - 空字符串环境变量会被忽略；数值型覆盖如果非法会在启动阶段直接报错，避免静默使用错误配置。
 - Docker Compose 已补充 `config`、`skills`、`logs`、`.tasks`、`.worktrees`、`.sessions`、`.transcripts` 等挂载，便于持久化运行态数据。
+- 用户文件记忆默认保存在：
+  - 宿主机：`.user_memories/<用户目录>/USER.md`
+  - 宿主机：`.user_memories/<用户目录>/MEMORY.md`
+  - 容器内：`/app/.user_memories/<用户目录>/USER.md`
+  - 容器内：`/app/.user_memories/<用户目录>/MEMORY.md`
+- 默认根目录来自 `config/config.yaml` 中的 `memory.file_memory.base_dir: ".user_memories"`。
+- `<用户目录>` 通常就是 `user_id`；如果 `user_id` 包含特殊字符、过长或不适合直接作为目录名，系统会自动做安全转换后再落盘。
 
 更多细节见 [`docs/runtime-guide.md`](docs/runtime-guide.md)。
