@@ -14,8 +14,8 @@ use crate::domain::chat::compaction::{
     auto_compact, estimate_tokens, microcompact, public_compaction_tool_schemas,
 };
 use crate::domain::chat::models::{
-    ChatEvent, ChatMode, ChatRequest, ChatResult, HistoryEntry, OutputFile, SkillUsage,
-    SystemPromptPreview,
+    AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
+    HistoryEntry, OutputFile, SkillUsage, SystemPromptPreview,
 };
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::{SessionContext, SessionService};
@@ -174,6 +174,7 @@ impl ChatOrchestrator {
                 &prepared.user_message,
                 &reply,
                 &skill_usages,
+                &prepared.prompt_overrides,
             )
             .await;
 
@@ -326,6 +327,7 @@ impl ChatOrchestrator {
                     prepared.user_message.clone(),
                     full_reply.clone(),
                     skill_usages.clone(),
+                    prepared.prompt_overrides.clone(),
                 );
                 log_final_reply(
                     &mode,
@@ -430,6 +432,7 @@ impl ChatOrchestrator {
             prepared.user_message.clone(),
             full_reply.clone(),
             skill_usages.clone(),
+            prepared.prompt_overrides.clone(),
         );
         log_final_reply(
             &mode,
@@ -488,6 +491,7 @@ impl ChatOrchestrator {
             session,
             user_id: request.user_id,
             llm_overrides: request.llm_overrides,
+            prompt_overrides: request.prompt_overrides,
         })
     }
 
@@ -507,6 +511,20 @@ impl ChatOrchestrator {
             stateless_prompt,
             memory_prompt,
         })
+    }
+
+    pub fn preview_agent_prompt_settings(&self) -> AgentPromptSettingsPreview {
+        AgentPromptSettingsPreview {
+            memory_maintenance_system: self.config.memory.prompts.maintenance_system.clone(),
+            memory_maintenance_user_template: self
+                .config
+                .memory
+                .prompts
+                .maintenance_user_template
+                .clone(),
+            skill_learning_system: self.config.skills.prompts.learning_system.clone(),
+            skill_learning_user_template: self.config.skills.prompts.learning_user_template.clone(),
+        }
     }
 
     fn build_system(&self, user_id: Option<&str>) -> String {
@@ -855,6 +873,7 @@ impl ChatOrchestrator {
         user_message: &str,
         assistant_reply: &str,
         skill_usages: &[SkillUsage],
+        prompt_overrides: &AgentPromptOverrides,
     ) -> Vec<SkillDocument> {
         if !matches!(mode, ChatMode::Memory) {
             return Vec::new();
@@ -870,6 +889,20 @@ impl ChatOrchestrator {
                 user_id,
                 user_message,
                 assistant_reply,
+                prompt_overrides
+                    .memory_maintenance_system
+                    .as_deref()
+                    .unwrap_or(self.config.memory.prompts.maintenance_system.as_str()),
+                prompt_overrides
+                    .memory_maintenance_user_template
+                    .as_deref()
+                    .unwrap_or(
+                        self.config
+                            .memory
+                            .prompts
+                            .maintenance_user_template
+                            .as_str(),
+                    ),
             )
             .await
         {
@@ -899,6 +932,14 @@ impl ChatOrchestrator {
                 skill_usages,
                 user_message,
                 assistant_reply,
+                prompt_overrides
+                    .skill_learning_system
+                    .as_deref()
+                    .unwrap_or(self.config.skills.prompts.learning_system.as_str()),
+                prompt_overrides
+                    .skill_learning_user_template
+                    .as_deref()
+                    .unwrap_or(self.config.skills.prompts.learning_user_template.as_str()),
             )
             .await
     }
@@ -998,6 +1039,7 @@ impl ChatOrchestrator {
         user_message: String,
         assistant_reply: String,
         skill_usages: Vec<SkillUsage>,
+        prompt_overrides: AgentPromptOverrides,
     ) {
         if !matches!(mode, ChatMode::Memory) {
             return;
@@ -1013,6 +1055,7 @@ impl ChatOrchestrator {
                     &user_message,
                     &assistant_reply,
                     &skill_usages,
+                    &prompt_overrides,
                 )
                 .await;
             tracing::info!(
@@ -1076,6 +1119,7 @@ struct PreparedRequest {
     session: Option<Arc<SessionContext>>,
     user_id: Option<String>,
     llm_overrides: crate::domain::chat::models::LlmOverrides,
+    prompt_overrides: AgentPromptOverrides,
 }
 
 fn append_uploaded_files(

@@ -92,6 +92,10 @@ export type AppSettings = {
   maxTokens: string;
   maxIterations: string;
   topP: string;
+  memoryMaintenanceSystemPrompt: string;
+  memoryMaintenanceUserPrompt: string;
+  skillLearningSystemPrompt: string;
+  skillLearningUserPrompt: string;
 };
 
 export type SkillItem = {

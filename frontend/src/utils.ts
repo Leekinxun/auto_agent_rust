@@ -265,6 +265,10 @@ export function buildFormData(
   appendOptionalFormData(formData, "max_tokens", settings.maxTokens);
   appendOptionalFormData(formData, "max_iterations", settings.maxIterations);
   appendOptionalFormData(formData, "top_p", settings.topP);
+  appendOptionalFormData(formData, "memory_maintenance_system", settings.memoryMaintenanceSystemPrompt);
+  appendOptionalFormData(formData, "memory_maintenance_user_template", settings.memoryMaintenanceUserPrompt);
+  appendOptionalFormData(formData, "skill_learning_system", settings.skillLearningSystemPrompt);
+  appendOptionalFormData(formData, "skill_learning_user_template", settings.skillLearningUserPrompt);
   files.forEach((file) => formData.append("files", file));
   return formData;
 }

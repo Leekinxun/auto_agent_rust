@@ -44,9 +44,90 @@ memory:
     memory_max_chars: 2200
     restructure_ratio: 0.5       # 文件内容达到上限的 50% 时，下一轮更新触发更激进的重构压缩
     update_max_tokens: 1800
+  prompts:
+    maintenance_system: "You maintain USER.md and MEMORY.md by using tools to inspect and directly update files. Never emit the full replacement file bodies in plain text."
+    maintenance_user_template: |
+      You are a maintenance agent for two local markdown memory files of a coding assistant.
+      Inspect the files with tools, decide whether they need updates, and directly modify them with the write tools.
+
+      USER.md scope:
+      - stable user preferences that would follow the user across projects
+      - communication style
+      - expectations
+      - work habits
+
+      MEMORY.md scope:
+      - environment facts
+      - tool quirks
+      - project conventions
+      - implementation decisions
+      - learned experience
+
+      Decision guide:
+      - Put coding workflow rules, architecture choices, operational procedures, backend/frontend integration rules, file layout rules, and tool-usage constraints in MEMORY.md.
+      - Put personal preferences about tone, collaboration style, and recurring user habits in USER.md.
+      - If something could fit both files, prefer MEMORY.md unless it is clearly a portable personal preference across unrelated projects.
+      - It is acceptable to update both files in one run when the latest turn contains both user-level and project-level durable information.
+
+      Rules:
+      - Keep only durable, reusable information likely to help future sessions.
+      - Do not store one-off task details unless they imply a reusable convention.
+      - Prefer short bullets or very short sections.
+      - Only call a write tool when that file should actually change.
+      - Do not return replacement file contents in normal text; use the write tools instead.
+      - Hard limit for USER.md: {user_limit} characters.
+      - Hard limit for MEMORY.md: {memory_limit} characters.
+      - USER.md aggressive compacting: {user_restructure}.
+      - MEMORY.md aggressive compacting: {memory_restructure}.
+      - USER.md path: {user_md_path}
+      - MEMORY.md path: {memory_md_path}
+
+      Read both files first unless you already have enough context from prior tool results in this run.
+
+      Current USER.md size: {current_user_len} chars.
+      Current MEMORY.md size: {current_memory_len} chars.
+
+      <latest_turn>
+      User:
+      {user_message}
+
+      Assistant:
+      {assistant_reply}
+      </latest_turn>
+
+      When you are done, respond with a brief summary such as 'updated USER.md', 'updated MEMORY.md', 'updated both', or 'no changes'.
 
 # ---------- Skills ----------
 skills:
   learning:
     enabled: true
     update_max_tokens: 2200
+  prompts:
+    learning_system: "You improve private skills for future runs by using tools to inspect and directly update the file. Keep changes concise and durable, and never emit the full replacement body in plain text."
+    learning_user_template: |
+      You are maintaining a user's private SKILL.md after a real assistant run.
+      Inspect the current skill body with tools, decide whether it should change, and directly update the file with the write tool.
+
+      Rules:
+      - Preserve the main purpose of the skill.
+      - Keep only durable, reusable guidance.
+      - Do not include one-off outputs, timestamps, or transient details.
+      - Prefer concise operational instructions.
+      - If the latest turn adds no durable lesson, leave the file unchanged.
+      - Do not return replacement markdown in normal text; use the write tool instead.
+      Skill source for this turn: {source_scope}
+
+      Private skill path: {skill_path}
+      Private skill name: {skill_name}
+      Current body size: {skill_body_len} chars
+
+      <latest_turn>
+      User:
+      {user_message}
+
+      Assistant:
+      {assistant_reply}
+      </latest_turn>
+
+      Read the current skill body first unless you already have it from earlier tool results in this run.
+      When you are done, respond briefly with 'updated skill' or 'no changes'.

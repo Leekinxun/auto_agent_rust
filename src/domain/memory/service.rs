@@ -71,6 +71,8 @@ impl UserMemoryService {
         user_id: Option<&str>,
         user_message: &str,
         assistant_reply: &str,
+        system_prompt: &str,
+        user_prompt_template: &str,
     ) -> Result<()> {
         let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) else {
             return Ok(());
@@ -91,56 +93,22 @@ impl UserMemoryService {
         let memory_restructure =
             current_memory.len() >= (memory_limit as f32 * restructure_ratio) as usize;
 
-        let prompt = format!(
-            "You are a maintenance agent for two local markdown memory files of a coding assistant.\n\
-Inspect the files with tools, decide whether they need updates, and directly modify them with the write tools.\n\n\
-USER.md scope:\n\
-- stable user preferences that would follow the user across projects\n\
-- communication style\n\
-- expectations\n\
-- work habits\n\n\
-MEMORY.md scope:\n\
-- environment facts\n\
-- tool quirks\n\
-- project conventions\n\
-- implementation decisions\n\
-- learned experience\n\n\
-Decision guide:\n\
-- Put coding workflow rules, architecture choices, operational procedures, backend/frontend integration rules, file layout rules, and tool-usage constraints in MEMORY.md.\n\
-- Put personal preferences about tone, collaboration style, and recurring user habits in USER.md.\n\
-- If something could fit both files, prefer MEMORY.md unless it is clearly a portable personal preference across unrelated projects.\n\
-- It is acceptable to update both files in one run when the latest turn contains both user-level and project-level durable information.\n\n\
-Rules:\n\
-- Keep only durable, reusable information likely to help future sessions.\n\
-- Do not store one-off task details unless they imply a reusable convention.\n\
-- Prefer short bullets or very short sections.\n\
-- Only call a write tool when that file should actually change.\n\
-- Do not return replacement file contents in normal text; use the write tools instead.\n\
-- Hard limit for USER.md: {user_limit} characters.\n\
-- Hard limit for MEMORY.md: {memory_limit} characters.\n\
-- USER.md aggressive compacting: {}.\n\
-- MEMORY.md aggressive compacting: {}.\n\
-- USER.md path: {}\n\
-- MEMORY.md path: {}\n\n\
-Read both files first unless you already have enough context from prior tool results in this run.\n\n\
-Current USER.md size: {} chars.\n\
-Current MEMORY.md size: {} chars.\n\n\
-<latest_turn>\nUser:\n{}\n\nAssistant:\n{}\n</latest_turn>\n\n\
-When you are done, respond with a brief summary such as 'updated USER.md', 'updated MEMORY.md', 'updated both', or 'no changes'.",
+        let prompt = render_memory_maintenance_prompt(
+            user_prompt_template,
+            user_limit,
+            memory_limit,
             if user_restructure { "yes" } else { "no" },
             if memory_restructure { "yes" } else { "no" },
-            paths.user_md.display(),
-            paths.memory_md.display(),
+            &paths.user_md.display().to_string(),
+            &paths.memory_md.display().to_string(),
             current_user.len(),
             current_memory.len(),
-            clip_text(user_message, 5_000),
-            clip_text(assistant_reply, 5_000)
+            &clip_text(user_message, 5_000),
+            &clip_text(assistant_reply, 5_000),
         );
 
         let mut messages = vec![
-            ChatMessage::system(
-                "You maintain USER.md and MEMORY.md by using tools to inspect and directly update files. Never emit the full replacement file bodies in plain text.",
-            ),
+            ChatMessage::system(system_prompt),
             ChatMessage::user(prompt),
         ];
         let mut read_state = HashSet::new();
@@ -382,6 +350,32 @@ fn clip_text(text: &str, limit: usize) -> String {
     }
     let clipped = text.chars().take(limit).collect::<String>();
     format!("{}\n...[truncated]", clipped.trim_end())
+}
+
+fn render_memory_maintenance_prompt(
+    template: &str,
+    user_limit: usize,
+    memory_limit: usize,
+    user_restructure: &str,
+    memory_restructure: &str,
+    user_md_path: &str,
+    memory_md_path: &str,
+    current_user_len: usize,
+    current_memory_len: usize,
+    user_message: &str,
+    assistant_reply: &str,
+) -> String {
+    template
+        .replace("{user_limit}", &user_limit.to_string())
+        .replace("{memory_limit}", &memory_limit.to_string())
+        .replace("{user_restructure}", user_restructure)
+        .replace("{memory_restructure}", memory_restructure)
+        .replace("{user_md_path}", user_md_path)
+        .replace("{memory_md_path}", memory_md_path)
+        .replace("{current_user_len}", &current_user_len.to_string())
+        .replace("{current_memory_len}", &current_memory_len.to_string())
+        .replace("{user_message}", user_message)
+        .replace("{assistant_reply}", assistant_reply)
 }
 
 #[cfg(test)]

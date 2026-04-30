@@ -31,6 +31,14 @@ pub struct LlmOverrides {
     pub top_p: Option<f32>,
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AgentPromptOverrides {
+    pub memory_maintenance_system: Option<String>,
+    pub memory_maintenance_user_template: Option<String>,
+    pub skill_learning_system: Option<String>,
+    pub skill_learning_user_template: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub message: String,
@@ -41,12 +49,21 @@ pub struct ChatRequest {
     pub user_id: Option<String>,
     pub files: Vec<UploadedFile>,
     pub llm_overrides: LlmOverrides,
+    pub prompt_overrides: AgentPromptOverrides,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SystemPromptPreview {
     pub stateless_prompt: String,
     pub memory_prompt: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentPromptSettingsPreview {
+    pub memory_maintenance_system: String,
+    pub memory_maintenance_user_template: String,
+    pub skill_learning_system: String,
+    pub skill_learning_user_template: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

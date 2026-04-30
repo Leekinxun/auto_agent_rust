@@ -49,6 +49,10 @@ type PromptPreviewState = {
   error: string;
   statelessPrompt: string;
   memoryPrompt: string;
+  memoryMaintenanceSystem: string;
+  memoryMaintenanceUserTemplate: string;
+  skillLearningSystem: string;
+  skillLearningUserTemplate: string;
 };
 
 type ChatTurnResult = {
@@ -66,7 +70,11 @@ const DEFAULT_SETTINGS: AppSettings = {
   temperature: "",
   maxTokens: "",
   maxIterations: "",
-  topP: ""
+  topP: "",
+  memoryMaintenanceSystemPrompt: "",
+  memoryMaintenanceUserPrompt: "",
+  skillLearningSystemPrompt: "",
+  skillLearningUserPrompt: ""
 };
 
 const SKILL_EDITOR_STORAGE_KEY = "auto_claude_code_frontend_skill_editor_v1";
@@ -274,7 +282,19 @@ function loadSettings(): AppSettings {
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
       maxTokens: typeof parsed.maxTokens === "string" ? parsed.maxTokens : DEFAULT_SETTINGS.maxTokens,
       maxIterations: typeof parsed.maxIterations === "string" ? parsed.maxIterations : DEFAULT_SETTINGS.maxIterations,
-      topP: typeof parsed.topP === "string" ? parsed.topP : DEFAULT_SETTINGS.topP
+      topP: typeof parsed.topP === "string" ? parsed.topP : DEFAULT_SETTINGS.topP,
+      memoryMaintenanceSystemPrompt: typeof parsed.memoryMaintenanceSystemPrompt === "string"
+        ? parsed.memoryMaintenanceSystemPrompt
+        : DEFAULT_SETTINGS.memoryMaintenanceSystemPrompt,
+      memoryMaintenanceUserPrompt: typeof parsed.memoryMaintenanceUserPrompt === "string"
+        ? parsed.memoryMaintenanceUserPrompt
+        : DEFAULT_SETTINGS.memoryMaintenanceUserPrompt,
+      skillLearningSystemPrompt: typeof parsed.skillLearningSystemPrompt === "string"
+        ? parsed.skillLearningSystemPrompt
+        : DEFAULT_SETTINGS.skillLearningSystemPrompt,
+      skillLearningUserPrompt: typeof parsed.skillLearningUserPrompt === "string"
+        ? parsed.skillLearningUserPrompt
+        : DEFAULT_SETTINGS.skillLearningUserPrompt
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -392,6 +412,10 @@ export default function App() {
   const [draftMaxTokens, setDraftMaxTokens] = useState(settings.maxTokens);
   const [draftMaxIterations, setDraftMaxIterations] = useState(settings.maxIterations);
   const [draftTopP, setDraftTopP] = useState(settings.topP);
+  const [draftMemoryMaintenanceSystemPrompt, setDraftMemoryMaintenanceSystemPrompt] = useState(settings.memoryMaintenanceSystemPrompt);
+  const [draftMemoryMaintenanceUserPrompt, setDraftMemoryMaintenanceUserPrompt] = useState(settings.memoryMaintenanceUserPrompt);
+  const [draftSkillLearningSystemPrompt, setDraftSkillLearningSystemPrompt] = useState(settings.skillLearningSystemPrompt);
+  const [draftSkillLearningUserPrompt, setDraftSkillLearningUserPrompt] = useState(settings.skillLearningUserPrompt);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [health, setHealth] = useState<HealthState>({ tone: "loading", label: "连接中..." });
   const [chats, setChats] = useState<Record<ChatModeId, ChatState>>(createInitialChats);
@@ -411,7 +435,11 @@ export default function App() {
     loading: false,
     error: "",
     statelessPrompt: "",
-    memoryPrompt: ""
+    memoryPrompt: "",
+    memoryMaintenanceSystem: "",
+    memoryMaintenanceUserTemplate: "",
+    skillLearningSystem: "",
+    skillLearningUserTemplate: ""
   });
 
   useEffect(() => {
@@ -426,6 +454,10 @@ export default function App() {
     setDraftMaxTokens(settings.maxTokens);
     setDraftMaxIterations(settings.maxIterations);
     setDraftTopP(settings.topP);
+    setDraftMemoryMaintenanceSystemPrompt(settings.memoryMaintenanceSystemPrompt);
+    setDraftMemoryMaintenanceUserPrompt(settings.memoryMaintenanceUserPrompt);
+    setDraftSkillLearningSystemPrompt(settings.skillLearningSystemPrompt);
+    setDraftSkillLearningUserPrompt(settings.skillLearningUserPrompt);
   }, [settings]);
 
   useEffect(() => {
@@ -495,16 +527,23 @@ export default function App() {
     let cancelled = false;
     setPromptPreview((current) => ({ ...current, loading: true, error: "" }));
 
-    void fetchPromptPreview(draftApiBase, draftMemoryUserId)
-      .then((data) => {
+    void Promise.all([
+      fetchPromptPreview(draftApiBase, draftMemoryUserId),
+      fetchAgentPromptSettings(draftApiBase)
+    ])
+      .then(([systemPromptData, agentPromptData]) => {
         if (cancelled) {
           return;
         }
         setPromptPreview({
           loading: false,
           error: "",
-          statelessPrompt: typeof data.stateless_prompt === "string" ? data.stateless_prompt : "",
-          memoryPrompt: typeof data.memory_prompt === "string" ? data.memory_prompt : ""
+          statelessPrompt: typeof systemPromptData.stateless_prompt === "string" ? systemPromptData.stateless_prompt : "",
+          memoryPrompt: typeof systemPromptData.memory_prompt === "string" ? systemPromptData.memory_prompt : "",
+          memoryMaintenanceSystem: typeof agentPromptData.memory_maintenance_system === "string" ? agentPromptData.memory_maintenance_system : "",
+          memoryMaintenanceUserTemplate: typeof agentPromptData.memory_maintenance_user_template === "string" ? agentPromptData.memory_maintenance_user_template : "",
+          skillLearningSystem: typeof agentPromptData.skill_learning_system === "string" ? agentPromptData.skill_learning_system : "",
+          skillLearningUserTemplate: typeof agentPromptData.skill_learning_user_template === "string" ? agentPromptData.skill_learning_user_template : ""
         });
       })
       .catch((error) => {
@@ -515,7 +554,11 @@ export default function App() {
           loading: false,
           error: getErrorMessage(error),
           statelessPrompt: "",
-          memoryPrompt: ""
+          memoryPrompt: "",
+          memoryMaintenanceSystem: "",
+          memoryMaintenanceUserTemplate: "",
+          skillLearningSystem: "",
+          skillLearningUserTemplate: ""
         });
       });
 
@@ -1285,9 +1328,13 @@ export default function App() {
                     health={health}
                     maxIterations={draftMaxIterations}
                     maxTokens={draftMaxTokens}
+                    memoryMaintenanceSystemPrompt={draftMemoryMaintenanceSystemPrompt}
+                    memoryMaintenanceUserPrompt={draftMemoryMaintenanceUserPrompt}
                     memoryUserId={draftMemoryUserId}
                     modelId={draftModelId}
                     promptPreview={promptPreview}
+                    skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
+                    skillLearningUserPrompt={draftSkillLearningUserPrompt}
                     temperature={draftTemperature}
                     topP={draftTopP}
                     onApiBaseChange={setDraftApiBase}
@@ -1296,8 +1343,12 @@ export default function App() {
                     onMaxTokensChange={setDraftMaxTokens}
                     onBrandSubtitleChange={setDraftBrandSubtitle}
                     onBrandTitleChange={setDraftBrandTitle}
+                    onMemoryMaintenanceSystemPromptChange={setDraftMemoryMaintenanceSystemPrompt}
+                    onMemoryMaintenanceUserPromptChange={setDraftMemoryMaintenanceUserPrompt}
                     onMemoryUserIdChange={setDraftMemoryUserId}
                     onModelIdChange={setDraftModelId}
+                    onSkillLearningSystemPromptChange={setDraftSkillLearningSystemPrompt}
+                    onSkillLearningUserPromptChange={setDraftSkillLearningUserPrompt}
                     onReset={() => {
                       setDraftApiBase(DEFAULT_SETTINGS.apiBase);
                       setDraftBrandTitle(DEFAULT_SETTINGS.brandTitle);
@@ -1309,6 +1360,10 @@ export default function App() {
                       setDraftMaxTokens(DEFAULT_SETTINGS.maxTokens);
                       setDraftMaxIterations(DEFAULT_SETTINGS.maxIterations);
                       setDraftTopP(DEFAULT_SETTINGS.topP);
+                      setDraftMemoryMaintenanceSystemPrompt(DEFAULT_SETTINGS.memoryMaintenanceSystemPrompt);
+                      setDraftMemoryMaintenanceUserPrompt(DEFAULT_SETTINGS.memoryMaintenanceUserPrompt);
+                      setDraftSkillLearningSystemPrompt(DEFAULT_SETTINGS.skillLearningSystemPrompt);
+                      setDraftSkillLearningUserPrompt(DEFAULT_SETTINGS.skillLearningUserPrompt);
                     }}
                     onSave={() => {
                       try {
@@ -1323,7 +1378,11 @@ export default function App() {
                           temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
                           maxTokens: normalizeOptionalNumericSetting(draftMaxTokens, "Max Tokens", "int", 1),
                           maxIterations: normalizeOptionalNumericSetting(draftMaxIterations, "Max Iterations", "int", 1),
-                          topP: normalizeOptionalNumericSetting(draftTopP, "Top P", "float", 0.01, 1)
+                          topP: normalizeOptionalNumericSetting(draftTopP, "Top P", "float", 0.01, 1),
+                          memoryMaintenanceSystemPrompt: draftMemoryMaintenanceSystemPrompt.trim(),
+                          memoryMaintenanceUserPrompt: draftMemoryMaintenanceUserPrompt.trim(),
+                          skillLearningSystemPrompt: draftSkillLearningSystemPrompt.trim(),
+                          skillLearningUserPrompt: draftSkillLearningUserPrompt.trim()
                         });
                         showToast("设置已保存", "success");
                       } catch (error) {
@@ -2281,6 +2340,10 @@ function SettingsWorkspace(props: {
   maxTokens: string;
   maxIterations: string;
   topP: string;
+  memoryMaintenanceSystemPrompt: string;
+  memoryMaintenanceUserPrompt: string;
+  skillLearningSystemPrompt: string;
+  skillLearningUserPrompt: string;
   onApiBaseChange: (value: string) => void;
   onAgentPromptAppendChange: (value: string) => void;
   onBrandTitleChange: (value: string) => void;
@@ -2291,6 +2354,10 @@ function SettingsWorkspace(props: {
   onMaxTokensChange: (value: string) => void;
   onMaxIterationsChange: (value: string) => void;
   onTopPChange: (value: string) => void;
+  onMemoryMaintenanceSystemPromptChange: (value: string) => void;
+  onMemoryMaintenanceUserPromptChange: (value: string) => void;
+  onSkillLearningSystemPromptChange: (value: string) => void;
+  onSkillLearningUserPromptChange: (value: string) => void;
   onTest: () => void;
   onReset: () => void;
   onSave: () => void;
@@ -2303,9 +2370,13 @@ function SettingsWorkspace(props: {
     health,
     maxIterations,
     maxTokens,
+    memoryMaintenanceSystemPrompt,
+    memoryMaintenanceUserPrompt,
     memoryUserId,
     modelId,
     promptPreview,
+    skillLearningSystemPrompt,
+    skillLearningUserPrompt,
     temperature,
     topP,
     onApiBaseChange,
@@ -2314,10 +2385,14 @@ function SettingsWorkspace(props: {
     onMaxTokensChange,
     onBrandSubtitleChange,
     onBrandTitleChange,
+    onMemoryMaintenanceSystemPromptChange,
+    onMemoryMaintenanceUserPromptChange,
     onMemoryUserIdChange,
     onModelIdChange,
     onReset,
     onSave,
+    onSkillLearningSystemPromptChange,
+    onSkillLearningUserPromptChange,
     onTemperatureChange,
     onTest,
     onTopPChange
@@ -2356,6 +2431,32 @@ function SettingsWorkspace(props: {
           <span>Agent 提示词追加项</span>
           <textarea onChange={(event) => onAgentPromptAppendChange(event.target.value)} placeholder="补充对主 agent 的长期指令，例如输出风格、回答约束、固定流程。" value={agentPromptAppend} />
           <small>这段内容会追加在后端默认系统提示词之后，不会覆盖现有默认规则。</small>
+        </label>
+        <div className="section-head">
+          <div>
+            <h3>记忆 / Skills 维护 Prompt</h3>
+            <span>用于控制 agent 如何写入 USER.md、MEMORY.md，以及如何更新私有 skills。留空则回退后端默认模板。</span>
+          </div>
+        </div>
+        <label className="field">
+          <span>USER.md / MEMORY.md 维护 System Prompt</span>
+          <textarea onChange={(event) => onMemoryMaintenanceSystemPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 system prompt" value={memoryMaintenanceSystemPrompt} />
+          <small>建议只写行为约束，不要在这里塞当前会话内容。</small>
+        </label>
+        <label className="field">
+          <span>USER.md / MEMORY.md 维护 User Prompt 模板</span>
+          <textarea onChange={(event) => onMemoryMaintenanceUserPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 user prompt 模板" value={memoryMaintenanceUserPrompt} />
+          <small>支持占位符：{"{user_limit}"}、{"{memory_limit}"}、{"{user_restructure}"}、{"{memory_restructure}"}、{"{user_md_path}"}、{"{memory_md_path}"}、{"{current_user_len}"}、{"{current_memory_len}"}、{"{user_message}"}、{"{assistant_reply}"}。</small>
+        </label>
+        <label className="field">
+          <span>私有 Skills 学习 System Prompt</span>
+          <textarea onChange={(event) => onSkillLearningSystemPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 system prompt" value={skillLearningSystemPrompt} />
+          <small>用于约束 skill 学习方式，例如保守更新、强调结构稳定等。</small>
+        </label>
+        <label className="field">
+          <span>私有 Skills 学习 User Prompt 模板</span>
+          <textarea onChange={(event) => onSkillLearningUserPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 user prompt 模板" value={skillLearningUserPrompt} />
+          <small>支持占位符：{"{source_scope}"}、{"{skill_path}"}、{"{skill_name}"}、{"{skill_body_len}"}、{"{user_message}"}、{"{assistant_reply}"}。</small>
         </label>
         <div className="section-head">
           <div>
@@ -2433,6 +2534,16 @@ function SettingsWorkspace(props: {
             <p>{agentPromptAppend.trim() ? "会追加到默认系统提示词后面" : "当前仅使用后端默认系统提示词"}</p>
           </article>
           <article className="stat-card">
+            <div className="soft-chip">Memory Prompts</div>
+            <h3>{memoryMaintenanceSystemPrompt.trim() || memoryMaintenanceUserPrompt.trim() ? "已覆盖" : "后端默认"}</h3>
+            <p>{memoryMaintenanceSystemPrompt.trim() || memoryMaintenanceUserPrompt.trim() ? "USER.md / MEMORY.md 维护提示词已自定义" : "当前使用后端内置的 USER.md / MEMORY.md 维护模板"}</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Skill Prompts</div>
+            <h3>{skillLearningSystemPrompt.trim() || skillLearningUserPrompt.trim() ? "已覆盖" : "后端默认"}</h3>
+            <p>{skillLearningSystemPrompt.trim() || skillLearningUserPrompt.trim() ? "私有 Skill 学习提示词已自定义" : "当前使用后端内置的私有 Skill 学习模板"}</p>
+          </article>
+          <article className="stat-card">
             <div className="soft-chip">Storage</div>
             <h3>LocalStorage</h3>
             <p>设置、聊天记录和 skills 草稿都保存在当前浏览器。</p>
@@ -2463,6 +2574,37 @@ function SettingsWorkspace(props: {
           </div>
         ) : null}
       </section>
+
+      <section className="panel settings-card">
+        <div className="section-head">
+          <div>
+            <h3>后端默认维护 Prompt</h3>
+            <span>展示后端当前内置的 USER.md / MEMORY.md 维护模板与私有 skill 学习模板，便于你复制后微调成覆盖项。</span>
+          </div>
+        </div>
+        {promptPreview.loading ? <div className="processing">正在加载维护 Prompt</div> : null}
+        {promptPreview.error ? <div className="empty-block">维护 Prompt 加载失败：{promptPreview.error}</div> : null}
+        {!promptPreview.loading && !promptPreview.error ? (
+          <div className="form-grid">
+            <label className="field">
+              <span>Memory 维护 System Prompt</span>
+              <textarea readOnly value={promptPreview.memoryMaintenanceSystem} />
+            </label>
+            <label className="field">
+              <span>Memory 维护 User Prompt 模板</span>
+              <textarea readOnly value={promptPreview.memoryMaintenanceUserTemplate} />
+            </label>
+            <label className="field">
+              <span>Skill 学习 System Prompt</span>
+              <textarea readOnly value={promptPreview.skillLearningSystem} />
+            </label>
+            <label className="field">
+              <span>Skill 学习 User Prompt 模板</span>
+              <textarea readOnly value={promptPreview.skillLearningUserTemplate} />
+            </label>
+          </div>
+        ) : null}
+      </section>
     </div>
   );
 }
@@ -2470,19 +2612,7 @@ function SettingsWorkspace(props: {
 async function testHealth(apiBase: string) {
   const response = await fetch(`${normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase)}/health`);
   if (!response.ok) {
-    let message = `请求失败 (${response.status})`;
-    try {
-      const data = await response.json() as Record<string, unknown>;
-      if (typeof data.detail === "string") {
-        message = data.detail;
-      }
-    } catch {
-      const text = await response.text();
-      if (text) {
-        message = text;
-      }
-    }
-    throw new Error(message);
+    throw new Error(await readErrorResponse(response));
   }
   return await response.json() as Record<string, unknown>;
 }
@@ -2497,20 +2627,33 @@ async function fetchPromptPreview(apiBase: string, userId: string) {
 
   const response = await fetch(`${target}/agent/system-prompt?${params.toString()}`);
   if (!response.ok) {
-    let message = `请求失败 (${response.status})`;
-    try {
-      const data = await response.json() as Record<string, unknown>;
-      if (typeof data.detail === "string") {
-        message = data.detail;
-      }
-    } catch {
-      const text = await response.text();
-      if (text) {
-        message = text;
-      }
-    }
-    throw new Error(message);
+    throw new Error(await readErrorResponse(response));
   }
 
   return await response.json() as Record<string, unknown>;
+}
+
+async function fetchAgentPromptSettings(apiBase: string) {
+  const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
+  const response = await fetch(`${target}/agent/settings/prompts`);
+  if (!response.ok) {
+    throw new Error(await readErrorResponse(response));
+  }
+  return await response.json() as Record<string, unknown>;
+}
+
+async function readErrorResponse(response: Response) {
+  let message = `请求失败 (${response.status})`;
+  try {
+    const data = await response.json() as Record<string, unknown>;
+    if (typeof data.detail === "string") {
+      message = data.detail;
+    }
+  } catch {
+    const text = await response.text();
+    if (text) {
+      message = text;
+    }
+  }
+  return message;
 }

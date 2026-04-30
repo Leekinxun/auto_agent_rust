@@ -46,12 +46,18 @@ describe("frontend chat surface", () => {
         temperature: "0.2",
         maxTokens: "4096",
         maxIterations: "9",
-        topP: "0.9"
+        topP: "0.9",
+        memoryMaintenanceSystemPrompt: "memory sys",
+        memoryMaintenanceUserPrompt: "memory user",
+        skillLearningSystemPrompt: "skill sys",
+        skillLearningUserPrompt: "skill user"
       }
     );
 
     expect(formData.get("max_iterations")).toBe("9");
     expect(formData.get("system_append")).toBe("extra prompt");
+    expect(formData.get("memory_maintenance_system")).toBe("memory sys");
+    expect(formData.get("skill_learning_user_template")).toBe("skill user");
   });
 
   it("hides incomplete think blocks from visible streaming text", () => {

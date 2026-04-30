@@ -13,7 +13,8 @@ use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse};
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
-    ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides, UploadedFile,
+    AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
+    UploadedFile,
 };
 
 pub fn router() -> Router<SharedState> {
@@ -23,6 +24,7 @@ pub fn router() -> Router<SharedState> {
         .route("/stream", post(agent_stream))
         .route("/memory/run", post(agent_memory_run))
         .route("/memory/stream", post(agent_memory_stream))
+        .route("/settings/prompts", get(agent_prompt_settings))
 }
 
 #[derive(Debug, Deserialize)]
@@ -38,6 +40,14 @@ async fn agent_system_prompt(
         .chat_orchestrator
         .preview_system_prompts(query.user_id.as_deref())?;
     Ok(Json(preview))
+}
+
+async fn agent_prompt_settings(
+    State(state): State<SharedState>,
+) -> ApiResult<Json<crate::domain::chat::models::AgentPromptSettingsPreview>> {
+    Ok(Json(
+        state.chat_orchestrator.preview_agent_prompt_settings(),
+    ))
 }
 
 async fn agent_run(
@@ -146,6 +156,10 @@ async fn parse_chat_multipart(
     let mut max_tokens: Option<u32> = None;
     let mut max_iterations: Option<usize> = None;
     let mut top_p: Option<f32> = None;
+    let mut memory_maintenance_system: Option<String> = None;
+    let mut memory_maintenance_user_template: Option<String> = None;
+    let mut skill_learning_system: Option<String> = None;
+    let mut skill_learning_user_template: Option<String> = None;
     let mut files = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
@@ -171,6 +185,12 @@ async fn parse_chat_multipart(
                 max_iterations = parse_optional_number::<usize>(&value, "max_iterations")?
             }
             "top_p" => top_p = parse_optional_number::<f32>(&value, "top_p")?,
+            "memory_maintenance_system" => memory_maintenance_system = non_empty(value),
+            "memory_maintenance_user_template" => {
+                memory_maintenance_user_template = non_empty(value)
+            }
+            "skill_learning_system" => skill_learning_system = non_empty(value),
+            "skill_learning_user_template" => skill_learning_user_template = non_empty(value),
             _ => {}
         }
     }
@@ -216,6 +236,12 @@ async fn parse_chat_multipart(
             max_tokens,
             max_iterations,
             top_p,
+        },
+        prompt_overrides: AgentPromptOverrides {
+            memory_maintenance_system,
+            memory_maintenance_user_template,
+            skill_learning_system,
+            skill_learning_user_template,
         },
     })
 }

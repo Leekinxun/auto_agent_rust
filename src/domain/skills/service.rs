@@ -64,6 +64,8 @@ impl SkillService {
         usages: &[SkillUsage],
         user_message: &str,
         assistant_reply: &str,
+        system_prompt: &str,
+        user_prompt_template: &str,
     ) -> Vec<SkillDocument> {
         let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) else {
             return Vec::new();
@@ -100,6 +102,8 @@ impl SkillService {
                     &usage,
                     user_message,
                     assistant_reply,
+                    system_prompt,
+                    user_prompt_template,
                 )
                 .await
             {
@@ -153,6 +157,8 @@ impl SkillService {
         usage: &SkillUsage,
         user_message: &str,
         assistant_reply: &str,
+        system_prompt: &str,
+        user_prompt_template: &str,
     ) -> Result<Option<SkillDocument>> {
         let private_exists = self.get_private_skill(user_id, &usage.name).is_ok();
         let mut created_private_copy = false;
@@ -172,6 +178,8 @@ impl SkillService {
                 usage.scope,
                 user_message,
                 assistant_reply,
+                system_prompt,
+                user_prompt_template,
             )
             .await?;
 
@@ -193,41 +201,23 @@ impl SkillService {
         source_scope: SkillScope,
         user_message: &str,
         assistant_reply: &str,
+        system_prompt: &str,
+        user_prompt_template: &str,
     ) -> Result<bool> {
         let mut skill = self.get_private_skill(user_id, skill_name)?;
         let original_body = skill.body.trim().to_string();
-        let prompt = format!(
-            "You are maintaining a user's private SKILL.md after a real assistant run.\n\
-Inspect the current skill body with tools, decide whether it should change, and directly update the file with the write tool.\n\n\
-Rules:\n\
-- Preserve the main purpose of the skill.\n\
-- Keep only durable, reusable guidance.\n\
-- Do not include one-off outputs, timestamps, or transient details.\n\
-- Prefer concise operational instructions.\n\
-- If the latest turn adds no durable lesson, leave the file unchanged.\n\
-- Do not return replacement markdown in normal text; use the write tool instead.\n\
-Skill source for this turn: {}\n\n\
-Private skill path: {}\n\
-Private skill name: {}\n\
-Current body size: {} chars\n\n\
-<latest_turn>\n\
-User:\n{}\n\n\
-Assistant:\n{}\n\
-</latest_turn>\n\n\
-Read the current skill body first unless you already have it from earlier tool results in this run.\n\
-When you are done, respond briefly with 'updated skill' or 'no changes'.",
+        let prompt = render_private_skill_learning_prompt(
+            user_prompt_template,
             source_scope.as_str(),
-            skill.path,
-            skill.name,
+            &skill.path,
+            &skill.name,
             skill.body.len(),
-            clip_text(user_message, 5_000),
-            clip_text(assistant_reply, 7_000),
+            &clip_text(user_message, 5_000),
+            &clip_text(assistant_reply, 7_000),
         );
 
         let mut messages = vec![
-            ChatMessage::system(
-                "You improve private skills for future runs by using tools to inspect and directly update the file. Keep changes concise and durable, and never emit the full replacement body in plain text.",
-            ),
+            ChatMessage::system(system_prompt),
             ChatMessage::user(prompt),
         ];
         let mut read_state = HashSet::new();
@@ -378,4 +368,22 @@ fn clip_text(text: &str, limit: usize) -> String {
     }
     let clipped = text.chars().take(limit).collect::<String>();
     format!("{}\n...[truncated]", clipped.trim_end())
+}
+
+fn render_private_skill_learning_prompt(
+    template: &str,
+    source_scope: &str,
+    skill_path: &str,
+    skill_name: &str,
+    skill_body_len: usize,
+    user_message: &str,
+    assistant_reply: &str,
+) -> String {
+    template
+        .replace("{source_scope}", source_scope)
+        .replace("{skill_path}", skill_path)
+        .replace("{skill_name}", skill_name)
+        .replace("{skill_body_len}", &skill_body_len.to_string())
+        .replace("{user_message}", user_message)
+        .replace("{assistant_reply}", assistant_reply)
 }
