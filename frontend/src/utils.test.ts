@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { CHAT_MODES, buildFormData, createInitialChats, getPathForView, getViewFromPath, isChatView, parseThinking, stripThinkingContent } from "./utils";
+import { CHAT_MODES, buildFormData, collectDownloadFiles, createInitialChats, getPathForView, getViewFromPath, isChatView, parseThinking, stripThinkingContent } from "./utils";
 
 describe("frontend chat surface", () => {
   it("only exposes the two streaming chat modes", () => {
@@ -72,5 +72,19 @@ describe("frontend chat surface", () => {
       { type: "thinking", content: "第一步" },
       { type: "text", content: "后文" }
     ]);
+  });
+
+  it("only shows downloads explicitly returned by the backend", () => {
+    expect(
+      collectDownloadFiles({
+        id: "assistant-1",
+        role: "assistant",
+        text: "已更新 USER.md，并参考 /app/outputs/report.md 继续处理。",
+        attachments: [],
+        processing: false,
+        outputFiles: [{ name: "report.md", path: "/app/outputs/report.md" }],
+        processItems: []
+      })
+    ).toEqual([{ name: "report.md", path: "/app/outputs/report.md" }]);
   });
 });

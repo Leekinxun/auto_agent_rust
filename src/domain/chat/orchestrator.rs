@@ -540,7 +540,7 @@ impl ChatOrchestrator {
             .unwrap_or_else(|_| "(no skills available)".to_string());
 
         let base = format!(
-            "You are a coding agent at {}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable. IMPORTANT: Save all generated output files (.docx/.xlsx/.csv/.md) to {}/outputs/ directory.",
+            "You are a coding agent at {}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable. IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be written under /app/outputs/ inside the container. In this workspace that maps to {}/outputs/. Do not place downloadable deliverables in uploads, memory files, or other directories.",
             self.repo_root.display(),
             self.repo_root.display()
         );
@@ -1313,6 +1313,8 @@ fn truncate_for_preview(text: &str, limit: usize) -> String {
 fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
     let pattern = Regex::new(r#"([^\s'"，。]+\.(?:docx|doc|md|xlsx|xls|csv))"#)
         .expect("valid output file regex");
+    let outputs_dir = repo_root.join("outputs");
+    let outputs_root = outputs_dir.canonicalize().unwrap_or(outputs_dir);
     let mut files = Vec::new();
     let mut seen = HashSet::new();
 
@@ -1329,12 +1331,18 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
         if !resolved.exists() || !resolved.is_file() {
             continue;
         }
-        let canonical = resolved.display().to_string();
+        let Ok(canonical_path) = resolved.canonicalize() else {
+            continue;
+        };
+        if !canonical_path.starts_with(&outputs_root) {
+            continue;
+        }
+        let canonical = canonical_path.display().to_string();
         if !seen.insert(canonical.clone()) {
             continue;
         }
         files.push(OutputFile {
-            name: resolved
+            name: canonical_path
                 .file_name()
                 .and_then(|value| value.to_str())
                 .unwrap_or(raw_path)
@@ -1350,13 +1358,16 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 mod tests {
     use super::{
         ChatMode, append_system_instruction, build_missing_reply_recovery_prompt,
-        build_subagent_initial_messages, log_final_reply, resolve_max_iterations,
+        build_subagent_initial_messages, extract_output_files, log_final_reply, resolve_max_iterations,
         static_public_tool_schemas,
     };
     use crate::domain::chat::models::LlmOverrides;
     use std::collections::HashSet;
+    use std::fs;
     use std::io::{self, Write};
+    use std::path::PathBuf;
     use std::sync::{Arc, Mutex};
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn static_public_tool_surface_matches_reference_set_except_dynamic_mcp() {
@@ -1493,6 +1504,66 @@ mod tests {
         assert!(prompt.contains("base prompt"));
         assert!(prompt.contains("<custom_agent_instruction>"));
         assert!(prompt.contains("Always summarize risks first."));
+    }
+
+    #[test]
+    fn extract_output_files_only_returns_files_from_outputs_directory() {
+        let repo = TestRepo::new();
+        let outputs = repo.root.join("outputs");
+        fs::create_dir_all(&outputs).unwrap();
+        let report = outputs.join("report.md");
+        fs::write(&report, "report").unwrap();
+        fs::write(repo.root.join("USER.md"), "profile").unwrap();
+        fs::write(repo.root.join("MEMORY.md"), "memory").unwrap();
+
+        let reply = format!(
+            "已生成 {}，并更新了 {} 和 {}。",
+            report.display(),
+            repo.root.join("USER.md").display(),
+            repo.root.join("MEMORY.md").display()
+        );
+
+        let files = extract_output_files(&repo.root, &reply);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].name, "report.md");
+        assert_eq!(PathBuf::from(&files[0].path), report.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn extract_output_files_ignores_memory_files_named_in_plain_text() {
+        let repo = TestRepo::new();
+        fs::create_dir_all(repo.root.join("outputs")).unwrap();
+        fs::write(repo.root.join("USER.md"), "profile").unwrap();
+        fs::write(repo.root.join("MEMORY.md"), "memory").unwrap();
+
+        let files = extract_output_files(&repo.root, "updated USER.md and MEMORY.md");
+        assert!(files.is_empty());
+    }
+
+    struct TestRepo {
+        root: PathBuf,
+    }
+
+    impl TestRepo {
+        fn new() -> Self {
+            let unique = format!(
+                "auto-claude-output-files-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("system time before unix epoch")
+                    .as_nanos()
+            );
+            let root = std::env::temp_dir().join(unique);
+            fs::create_dir_all(&root).expect("create temp repo");
+            Self { root }
+        }
+    }
+
+    impl Drop for TestRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
     }
 
     #[derive(Clone, Default)]

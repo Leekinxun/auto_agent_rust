@@ -186,22 +186,11 @@ export function renderMarkdown(markdown: string) {
   return marked.parse(markdown) as string;
 }
 
-export function extractMentionedFiles(text: string) {
-  const matches = text.match(/([^\s`"'，。；：]+?\.(?:docx?|md|txt|pdf|xlsx?|csv))/gi) || [];
-  return [...new Set(matches.map((item) => item.trim()))];
-}
-
 export function collectDownloadFiles(message: DisplayMessage): OutputFile[] {
   const result = new Map<string, OutputFile>();
   message.outputFiles.forEach((file) => {
     const key = file.path || file.name;
     result.set(key, file);
-  });
-
-  extractMentionedFiles(message.text).forEach((name) => {
-    if (!result.has(name)) {
-      result.set(name, { name });
-    }
   });
 
   return [...result.values()];
