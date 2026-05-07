@@ -1,6 +1,7 @@
 use serde::Serialize;
 
 use crate::domain::skills::models::{SkillDocument, SkillScope};
+use crate::infra::mcp::client::McpServerPreview;
 
 #[derive(Debug, Clone)]
 pub enum ChatMode {
@@ -39,6 +40,13 @@ pub struct AgentPromptOverrides {
     pub skill_learning_user_template: Option<String>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct McpOverrides {
+    pub config_path: Option<String>,
+    pub base_urls: Vec<String>,
+    pub disabled_urls: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatRequest {
     pub message: String,
@@ -50,6 +58,7 @@ pub struct ChatRequest {
     pub files: Vec<UploadedFile>,
     pub llm_overrides: LlmOverrides,
     pub prompt_overrides: AgentPromptOverrides,
+    pub mcp_overrides: McpOverrides,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -64,6 +73,26 @@ pub struct AgentPromptSettingsPreview {
     pub memory_maintenance_user_template: String,
     pub skill_learning_system: String,
     pub skill_learning_user_template: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpSettingsPreview {
+    pub servers: Vec<McpServerPreviewDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpServerPreviewDto {
+    pub endpoint: String,
+    pub ok: bool,
+    pub tool_count: usize,
+    pub tools: Vec<McpToolPreviewDto>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct McpToolPreviewDto {
+    pub name: String,
+    pub description: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -96,4 +125,23 @@ pub enum ChatEvent {
     SkillsUpdated(Vec<SkillDocument>),
     Done { finish_reason: String },
     Error { detail: String },
+}
+
+impl From<McpServerPreview> for McpServerPreviewDto {
+    fn from(value: McpServerPreview) -> Self {
+        Self {
+            endpoint: value.endpoint,
+            ok: value.ok,
+            tool_count: value.tool_count,
+            tools: value
+                .tools
+                .into_iter()
+                .map(|tool| McpToolPreviewDto {
+                    name: tool.name,
+                    description: tool.description,
+                })
+                .collect(),
+            error: value.error,
+        }
+    }
 }

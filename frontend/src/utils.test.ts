@@ -1,6 +1,18 @@
 import { describe, expect, it } from "vitest";
 
-import { CHAT_MODES, buildFormData, collectDownloadFiles, createInitialChats, getPathForView, getViewFromPath, isChatView, parseThinking, stripThinkingContent } from "./utils";
+import {
+  CHAT_MODES,
+  buildFormData,
+  collectDownloadFiles,
+  createInitialChats,
+  getPathForView,
+  getViewFromPath,
+  isChatView,
+  normalizeMcpPreviewServers,
+  parseMcpBaseUrlsInput,
+  parseThinking,
+  stripThinkingContent
+} from "./utils";
 
 describe("frontend chat surface", () => {
   it("only exposes the two streaming chat modes", () => {
@@ -41,6 +53,9 @@ describe("frontend chat surface", () => {
         brandTitle: "brand",
         brandSubtitle: "subtitle",
         memoryUserId: "user-1",
+        mcpConfigPath: "/tmp/mcp.json",
+        mcpBaseUrls: "http://mcp-a.example/mcp\nhttp://mcp-b.example/mcp",
+        mcpDisabledUrls: ["http://mcp-b.example/mcp"],
         agentPromptAppend: "extra prompt",
         modelId: "demo-model",
         temperature: "0.2",
@@ -55,6 +70,9 @@ describe("frontend chat surface", () => {
     );
 
     expect(formData.get("max_iterations")).toBe("9");
+    expect(formData.get("mcp_config_path")).toBe("/tmp/mcp.json");
+    expect(formData.get("mcp_base_urls")).toBe("[\"http://mcp-a.example/mcp\",\"http://mcp-b.example/mcp\"]");
+    expect(formData.get("mcp_disabled_urls")).toBe("[\"http://mcp-b.example/mcp\"]");
     expect(formData.get("system_append")).toBe("extra prompt");
     expect(formData.get("memory_maintenance_system")).toBe("memory sys");
     expect(formData.get("skill_learning_user_template")).toBe("skill user");
@@ -86,5 +104,37 @@ describe("frontend chat surface", () => {
         processItems: []
       })
     ).toEqual([{ name: "report.md", path: "/app/outputs/report.md" }]);
+  });
+
+  it("deduplicates and parses MCP base urls from textarea input", () => {
+    expect(parseMcpBaseUrlsInput("http://a/mcp\nhttp://b/mcp, http://a/mcp")).toEqual([
+      "http://a/mcp",
+      "http://b/mcp"
+    ]);
+  });
+
+  it("normalizes MCP preview servers from snake_case payloads", () => {
+    expect(normalizeMcpPreviewServers([
+      {
+        endpoint: "http://a/mcp",
+        ok: true,
+        tool_count: 2,
+        tools: [
+          { name: "tool_a", description: "desc a" },
+          { name: "tool_b" }
+        ]
+      }
+    ])).toEqual([
+      {
+        endpoint: "http://a/mcp",
+        ok: true,
+        toolCount: 2,
+        tools: [
+          { name: "tool_a", description: "desc a" },
+          { name: "tool_b", description: "" }
+        ],
+        error: undefined
+      }
+    ]);
   });
 });

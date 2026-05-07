@@ -605,6 +605,19 @@ mod tests {
         assert_eq!(health["status"], json!("ok"));
         assert_eq!(health["model"], json!("stub-model"));
 
+        let mcp_preview = harness
+            .client
+            .get(format!("{}/agent/settings/mcp", harness.base_url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(mcp_preview["servers"], json!([]));
+
         let tasks = harness
             .client
             .get(format!("{}/agent/tasks", harness.base_url))

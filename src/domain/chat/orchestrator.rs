@@ -15,7 +15,8 @@ use crate::domain::chat::compaction::{
 };
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
-    HistoryEntry, OutputFile, SkillUsage, SystemPromptPreview,
+    HistoryEntry, McpServerPreviewDto, McpSettingsPreview, OutputFile, SkillUsage,
+    SystemPromptPreview,
 };
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::{SessionContext, SessionService};
@@ -79,7 +80,12 @@ impl ChatOrchestrator {
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
-        let tools = self.load_public_tools(prepared.session.is_some()).await;
+        let tools = self
+            .load_public_tools_with_overrides(
+                prepared.session.is_some(),
+                Some(&prepared.mcp_overrides),
+            )
+            .await;
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
@@ -123,6 +129,7 @@ impl ChatOrchestrator {
                         prepared.session.as_deref(),
                         prepared.user_id.as_deref(),
                         matches!(mode, ChatMode::Memory),
+                        &prepared.mcp_overrides,
                         &mut skill_usages,
                     )
                     .await;
@@ -197,7 +204,12 @@ impl ChatOrchestrator {
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
-        let tools = self.load_public_tools(prepared.session.is_some()).await;
+        let tools = self
+            .load_public_tools_with_overrides(
+                prepared.session.is_some(),
+                Some(&prepared.mcp_overrides),
+            )
+            .await;
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
 
@@ -359,6 +371,7 @@ impl ChatOrchestrator {
                         prepared.session.as_deref(),
                         prepared.user_id.as_deref(),
                         matches!(mode, ChatMode::Memory),
+                        &prepared.mcp_overrides,
                         &mut skill_usages,
                     )
                     .await;
@@ -492,6 +505,7 @@ impl ChatOrchestrator {
             user_id: request.user_id,
             llm_overrides: request.llm_overrides,
             prompt_overrides: request.prompt_overrides,
+            mcp_overrides: request.mcp_overrides,
         })
     }
 
@@ -525,6 +539,20 @@ impl ChatOrchestrator {
             skill_learning_system: self.config.skills.prompts.learning_system.clone(),
             skill_learning_user_template: self.config.skills.prompts.learning_user_template.clone(),
         }
+    }
+
+    pub async fn preview_mcp_settings(
+        &self,
+        overrides: crate::domain::chat::models::McpOverrides,
+    ) -> Result<McpSettingsPreview> {
+        let servers = self
+            .mcp_client
+            .inspect_servers(Some(&overrides))
+            .await?
+            .into_iter()
+            .map(McpServerPreviewDto::from)
+            .collect();
+        Ok(McpSettingsPreview { servers })
     }
 
     fn build_system(&self, user_id: Option<&str>) -> String {
@@ -572,9 +600,13 @@ impl ChatOrchestrator {
         })
     }
 
-    async fn load_public_tools(&self, include_session_tools: bool) -> Vec<serde_json::Value> {
+    async fn load_public_tools_with_overrides(
+        &self,
+        include_session_tools: bool,
+        mcp_overrides: Option<&crate::domain::chat::models::McpOverrides>,
+    ) -> Vec<serde_json::Value> {
         let mut tools = static_public_tool_schemas(include_session_tools);
-        match self.mcp_client.list_tool_schemas().await {
+        match self.mcp_client.list_tool_schemas(mcp_overrides).await {
             Ok(mcp_tools) => tools.extend(mcp_tools),
             Err(error) => {
                 tracing::warn!(?error, "failed to load mcp tools; continuing without them")
@@ -589,6 +621,7 @@ impl ChatOrchestrator {
         session: Option<&SessionContext>,
         user_id: Option<&str>,
         memory_mode: bool,
+        mcp_overrides: &crate::domain::chat::models::McpOverrides,
         skill_usages: &mut Vec<SkillUsage>,
     ) -> String {
         let arguments = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
@@ -596,11 +629,14 @@ impl ChatOrchestrator {
         let tool_name = tool_call.function.name.as_str();
 
         if tool_name.starts_with("mcp_") {
-            return self.mcp_client.call_tool(tool_name, arguments).await;
+            return self
+                .mcp_client
+                .call_tool(tool_name, arguments, Some(mcp_overrides))
+                .await;
         }
 
         if tool_name == "read_file" && should_use_mcp_file_reader(&arguments) {
-            return self.read_file_via_mcp(&arguments).await;
+            return self.read_file_via_mcp(&arguments, mcp_overrides).await;
         }
 
         if tool_name == "compress" {
@@ -689,7 +725,11 @@ impl ChatOrchestrator {
         })
     }
 
-    async fn read_file_via_mcp(&self, arguments: &serde_json::Value) -> String {
+    async fn read_file_via_mcp(
+        &self,
+        arguments: &serde_json::Value,
+        mcp_overrides: &crate::domain::chat::models::McpOverrides,
+    ) -> String {
         let path = arguments
             .get("path")
             .and_then(|value| value.as_str())
@@ -724,6 +764,7 @@ impl ChatOrchestrator {
                     "file_content": STANDARD.encode(bytes),
                     "file_type": file_type,
                 }),
+                Some(mcp_overrides),
             )
             .await
     }
@@ -1120,6 +1161,7 @@ struct PreparedRequest {
     user_id: Option<String>,
     llm_overrides: crate::domain::chat::models::LlmOverrides,
     prompt_overrides: AgentPromptOverrides,
+    mcp_overrides: crate::domain::chat::models::McpOverrides,
 }
 
 fn append_uploaded_files(
@@ -1358,8 +1400,8 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 mod tests {
     use super::{
         ChatMode, append_system_instruction, build_missing_reply_recovery_prompt,
-        build_subagent_initial_messages, extract_output_files, log_final_reply, resolve_max_iterations,
-        static_public_tool_schemas,
+        build_subagent_initial_messages, extract_output_files, log_final_reply,
+        resolve_max_iterations, static_public_tool_schemas,
     };
     use crate::domain::chat::models::LlmOverrides;
     use std::collections::HashSet;
@@ -1526,7 +1568,10 @@ mod tests {
         let files = extract_output_files(&repo.root, &reply);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].name, "report.md");
-        assert_eq!(PathBuf::from(&files[0].path), report.canonicalize().unwrap());
+        assert_eq!(
+            PathBuf::from(&files[0].path),
+            report.canonicalize().unwrap()
+        );
     }
 
     #[test]

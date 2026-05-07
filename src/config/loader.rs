@@ -113,6 +113,12 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["MCP_BASE_URL"]) {
         config.mcp.base_url = value;
     }
+    if let Some(value) = first_non_empty_env(get_env, &["MCP_BASE_URLS"]) {
+        config.mcp.base_urls = split_csv(&value);
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["MCP_CONFIG_PATH"]) {
+        config.mcp.config_path = value;
+    }
     if let Some(value) = first_non_empty_env(get_env, &["MCP_TIMEOUT"]) {
         config.mcp.timeout = parse_positive_u64("MCP_TIMEOUT", &value)?;
     }

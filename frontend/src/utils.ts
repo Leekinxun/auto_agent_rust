@@ -1,5 +1,14 @@
 import { marked } from "marked";
-import type { AppSettings, ChatModeConfig, ChatModeId, ChatState, DisplayMessage, OutputFile, ViewId } from "./types";
+import type {
+  AppSettings,
+  ChatModeConfig,
+  ChatModeId,
+  ChatState,
+  DisplayMessage,
+  McpServerPreview,
+  OutputFile,
+  ViewId
+} from "./types";
 
 export const SETTINGS_KEY = "auto_claude_code_frontend_settings";
 export const DEFAULT_API_BASE = window.location.origin || "http://localhost:8080";
@@ -127,6 +136,68 @@ export function normalizeApiBase(value: string) {
   return (value || DEFAULT_API_BASE).trim().replace(/\/+$/, "");
 }
 
+export function normalizeMcpEndpoint(value: string) {
+  return value.trim().replace(/\/+$/, "");
+}
+
+export function parseMcpBaseUrlsInput(value: string) {
+  const seen = new Set<string>();
+  return value
+    .split(/\r?\n|,/)
+    .map((item) => normalizeMcpEndpoint(item))
+    .filter((item) => item.length > 0)
+    .filter((item) => {
+      if (seen.has(item)) {
+        return false;
+      }
+      seen.add(item);
+      return true;
+    });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+export function normalizeMcpPreviewServers(value: unknown): McpServerPreview[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((server) => {
+    if (!isRecord(server) || typeof server.endpoint !== "string") {
+      return [];
+    }
+
+    const tools = Array.isArray(server.tools)
+      ? server.tools.flatMap((tool) => {
+        if (!isRecord(tool) || typeof tool.name !== "string") {
+          return [];
+        }
+        return [{
+          name: tool.name,
+          description: typeof tool.description === "string" ? tool.description : ""
+        }];
+      })
+      : [];
+
+    const rawToolCount =
+      typeof server.toolCount === "number"
+        ? server.toolCount
+        : typeof server.tool_count === "number"
+          ? server.tool_count
+          : tools.length;
+
+    return [{
+      endpoint: server.endpoint,
+      ok: typeof server.ok === "boolean" ? server.ok : false,
+      toolCount: rawToolCount,
+      tools,
+      error: typeof server.error === "string" ? server.error : undefined
+    }];
+  });
+}
+
 export function suggestFolder(value: string) {
   const cleaned = value
     .trim()
@@ -247,6 +318,14 @@ export function buildFormData(
   formData.append("session_id", config.sessionId);
   if (config.memory) {
     formData.append("user_id", settings.memoryUserId.trim() || config.userId || DEFAULT_MEMORY_USER_ID);
+  }
+  appendOptionalFormData(formData, "mcp_config_path", settings.mcpConfigPath);
+  const normalizedMcpBaseUrls = parseMcpBaseUrlsInput(settings.mcpBaseUrls);
+  if (normalizedMcpBaseUrls.length) {
+    formData.append("mcp_base_urls", JSON.stringify(normalizedMcpBaseUrls));
+  }
+  if (settings.mcpDisabledUrls.length) {
+    formData.append("mcp_disabled_urls", JSON.stringify(settings.mcpDisabledUrls.map((item) => normalizeMcpEndpoint(item)).filter(Boolean)));
   }
   appendOptionalFormData(formData, "system_append", settings.agentPromptAppend);
   appendOptionalFormData(formData, "model_id", settings.modelId);

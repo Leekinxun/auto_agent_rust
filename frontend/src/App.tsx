@@ -11,6 +11,7 @@ import type {
   OutputFile,
   ProcessItem,
   QueuedChatSubmission,
+  McpServerPreview,
   SkillEditorState,
   SkillItem,
   SkillScope,
@@ -35,6 +36,9 @@ import {
   getViewFromPath,
   isChatView,
   normalizeApiBase,
+  normalizeMcpEndpoint,
+  normalizeMcpPreviewServers,
+  parseMcpBaseUrlsInput,
   parseThinking,
   readEventStream,
   renderMarkdown,
@@ -55,9 +59,22 @@ type PromptPreviewState = {
   skillLearningUserTemplate: string;
 };
 
+type McpPreviewState = {
+  loading: boolean;
+  error: string;
+  servers: McpServerPreview[];
+};
+
 type ChatTurnResult = {
   reply: string;
   aborted: boolean;
+};
+
+type McpHealthCache = {
+  key: string;
+  checkedAt: number;
+  servers: McpServerPreview[];
+  error: string | null;
 };
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -65,6 +82,9 @@ const DEFAULT_SETTINGS: AppSettings = {
   brandTitle: "中科院智能体平台",
   brandSubtitle: "统一承载多模式智能体对话、技能管理与平台配置。",
   memoryUserId: DEFAULT_MEMORY_USER_ID,
+  mcpConfigPath: "",
+  mcpBaseUrls: "",
+  mcpDisabledUrls: [],
   agentPromptAppend: "",
   modelId: "",
   temperature: "",
@@ -82,6 +102,7 @@ const SKILL_SCOPE_STORAGE_KEY = "auto_claude_code_frontend_skill_scope_v1";
 const SIDEBAR_COLLAPSED_KEY = "auto_claude_code_frontend_sidebar_collapsed";
 const STREAM_REVEAL_INTERVAL_MS = 16;
 const HEALTH_RECHECK_INTERVAL_MS = 15000;
+const MCP_HEALTH_CACHE_MS = 60000;
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160;
 const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 320;
 
@@ -101,6 +122,59 @@ function getStreamRevealStep(queueLength: number) {
     return 3;
   }
   return 1;
+}
+
+function normalizeMcpUrlList(values: string[]) {
+  const seen = new Set<string>();
+  return values
+    .map((value) => normalizeMcpEndpoint(value))
+    .filter((value) => value.length > 0)
+    .filter((value) => {
+      if (seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+}
+
+function isMcpServerDisabled(endpoint: string, disabledUrls: string[]) {
+  const normalized = normalizeMcpEndpoint(endpoint);
+  return normalizeMcpUrlList(disabledUrls).includes(normalized);
+}
+
+function buildMcpCacheKey(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[]) {
+  return JSON.stringify({
+    apiBase: normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase),
+    configPath: configPath.trim(),
+    baseUrls: parseMcpBaseUrlsInput(rawBaseUrls),
+    disabledUrls: normalizeMcpUrlList(disabledUrls).sort()
+  });
+}
+
+function summarizeMcpServers(servers: McpServerPreview[]) {
+  return {
+    okCount: servers.filter((server) => server.ok).length,
+    totalServers: servers.length,
+    totalTools: servers.reduce((sum, server) => sum + (typeof server.toolCount === "number" ? server.toolCount : server.tools.length), 0)
+  };
+}
+
+async function copyTextToClipboard(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "true");
+  textarea.style.position = "fixed";
+  textarea.style.opacity = "0";
+  document.body.appendChild(textarea);
+  textarea.select();
+  document.execCommand("copy");
+  document.body.removeChild(textarea);
 }
 
 function isScrollableOverflow(value: string) {
@@ -277,6 +351,11 @@ function loadSettings(): AppSettings {
       memoryUserId: typeof parsed.memoryUserId === "string" && parsed.memoryUserId.trim()
         ? parsed.memoryUserId.trim()
         : DEFAULT_SETTINGS.memoryUserId,
+      mcpConfigPath: typeof parsed.mcpConfigPath === "string" ? parsed.mcpConfigPath : DEFAULT_SETTINGS.mcpConfigPath,
+      mcpBaseUrls: typeof parsed.mcpBaseUrls === "string" ? parsed.mcpBaseUrls : DEFAULT_SETTINGS.mcpBaseUrls,
+      mcpDisabledUrls: Array.isArray(parsed.mcpDisabledUrls)
+        ? normalizeMcpUrlList(parsed.mcpDisabledUrls.filter((item): item is string => typeof item === "string"))
+        : DEFAULT_SETTINGS.mcpDisabledUrls,
       agentPromptAppend: typeof parsed.agentPromptAppend === "string" ? parsed.agentPromptAppend : DEFAULT_SETTINGS.agentPromptAppend,
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
@@ -406,6 +485,9 @@ export default function App() {
   const [draftBrandTitle, setDraftBrandTitle] = useState(settings.brandTitle);
   const [draftBrandSubtitle, setDraftBrandSubtitle] = useState(settings.brandSubtitle);
   const [draftMemoryUserId, setDraftMemoryUserId] = useState(settings.memoryUserId);
+  const [draftMcpConfigPath, setDraftMcpConfigPath] = useState(settings.mcpConfigPath);
+  const [draftMcpBaseUrls, setDraftMcpBaseUrls] = useState(settings.mcpBaseUrls);
+  const [draftMcpDisabledUrls, setDraftMcpDisabledUrls] = useState<string[]>(settings.mcpDisabledUrls);
   const [draftAgentPromptAppend, setDraftAgentPromptAppend] = useState(settings.agentPromptAppend);
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
   const [draftTemperature, setDraftTemperature] = useState(settings.temperature);
@@ -441,6 +523,12 @@ export default function App() {
     skillLearningSystem: "",
     skillLearningUserTemplate: ""
   });
+  const [mcpPreview, setMcpPreview] = useState<McpPreviewState>({
+    loading: false,
+    error: "",
+    servers: []
+  });
+  const mcpHealthCacheRef = useRef<McpHealthCache | null>(null);
 
   useEffect(() => {
     window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -448,6 +536,9 @@ export default function App() {
     setDraftBrandTitle(settings.brandTitle);
     setDraftBrandSubtitle(settings.brandSubtitle);
     setDraftMemoryUserId(settings.memoryUserId);
+    setDraftMcpConfigPath(settings.mcpConfigPath);
+    setDraftMcpBaseUrls(settings.mcpBaseUrls);
+    setDraftMcpDisabledUrls(settings.mcpDisabledUrls);
     setDraftAgentPromptAppend(settings.agentPromptAppend);
     setDraftModelId(settings.modelId);
     setDraftTemperature(settings.temperature);
@@ -568,6 +659,41 @@ export default function App() {
   }, [currentView, draftApiBase, draftMemoryUserId]);
 
   useEffect(() => {
+    if (currentView !== "settings") {
+      return;
+    }
+
+    let cancelled = false;
+    setMcpPreview((current) => ({ ...current, loading: true, error: "" }));
+
+    void fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls)
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        setMcpPreview({
+          loading: false,
+          error: "",
+          servers: normalizeMcpPreviewServers(data.servers)
+        });
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setMcpPreview({
+          loading: false,
+          error: getErrorMessage(error),
+          servers: []
+        });
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls]);
+
+  useEffect(() => {
     if (currentView === "skills") {
       void loadSkills();
     }
@@ -610,6 +736,55 @@ export default function App() {
   async function fetchJson(path: string, init?: RequestInit) {
     const response = await fetchResponse(path, init);
     return await response.json() as Record<string, unknown>;
+  }
+
+  async function testMcpConnection() {
+    const data = await fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls);
+    const servers = normalizeMcpPreviewServers(data.servers);
+    const { okCount, totalServers, totalTools } = summarizeMcpServers(servers);
+    setMcpPreview({
+      loading: false,
+      error: "",
+      servers
+    });
+    return { okCount, totalTools, totalServers };
+  }
+
+  async function copyMcpServer(server: McpServerPreview, disabled: boolean) {
+    await copyTextToClipboard(
+      [
+        `Endpoint: ${server.endpoint}`,
+        `Enabled: ${disabled ? "no" : "yes"}`,
+        `Status: ${server.ok ? "ok" : "error"}`,
+        ...(server.error ? [`Error: ${server.error}`] : []),
+        ...server.tools.map((tool) => `- ${tool.name}${tool.description ? ` - ${tool.description}` : ""}`)
+      ].join("\n")
+    );
+    showToast(`已复制 ${server.endpoint} 的工具清单`, "success");
+  }
+
+  async function copyVisibleMcpTools(servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>, disabledUrls: string[]) {
+    const lines = servers.flatMap((server) => {
+      const enabledLabel = isMcpServerDisabled(server.endpoint, disabledUrls) ? "disabled" : "enabled";
+      const base = [`Endpoint: ${server.endpoint} (${enabledLabel}, ${server.ok ? "ok" : "error"})`];
+      if (server.error) {
+        base.push(`Error: ${server.error}`);
+      }
+      if (server.tools.length) {
+        base.push(...server.tools.map((tool) => `- ${tool.name}${tool.description ? ` - ${tool.description}` : ""}`));
+      } else {
+        base.push("- (no visible tools)");
+      }
+      return base;
+    });
+
+    if (!lines.length) {
+      showToast("当前没有可复制的 MCP 工具", "info");
+      return;
+    }
+
+    await copyTextToClipboard(lines.join("\n"));
+    showToast(`已复制 ${servers.length} 个 MCP 的工具清单`, "success");
   }
 
   const skillUserId = settings.memoryUserId.trim() || DEFAULT_MEMORY_USER_ID;
@@ -743,6 +918,73 @@ export default function App() {
     void runChatSubmission(mode, submission);
   }
 
+  async function runPreChatMcpHealthCheck() {
+    const hasMcpSettings =
+      settings.mcpConfigPath.trim().length > 0 || parseMcpBaseUrlsInput(settings.mcpBaseUrls).length > 0;
+    if (!hasMcpSettings) {
+      return null;
+    }
+
+    const cacheKey = buildMcpCacheKey(
+      settings.apiBase,
+      settings.mcpConfigPath,
+      settings.mcpBaseUrls,
+      settings.mcpDisabledUrls
+    );
+    const now = Date.now();
+    const cached = mcpHealthCacheRef.current;
+
+    if (cached && cached.key === cacheKey && now - cached.checkedAt < MCP_HEALTH_CACHE_MS) {
+      return cached;
+    }
+
+    try {
+      const data = await fetchMcpPreview(
+        settings.apiBase,
+        settings.mcpConfigPath,
+        settings.mcpBaseUrls,
+        settings.mcpDisabledUrls
+      );
+      const servers = normalizeMcpPreviewServers(data.servers);
+      setMcpPreview({
+        loading: false,
+        error: "",
+        servers
+      });
+      const result: McpHealthCache = {
+        key: cacheKey,
+        checkedAt: now,
+        servers,
+        error: null
+      };
+      mcpHealthCacheRef.current = result;
+      const { okCount, totalServers, totalTools } = summarizeMcpServers(servers);
+      showToast(
+        totalServers
+          ? `MCP 预检查：${okCount}/${totalServers} 可用，共 ${totalTools} 个工具`
+          : "MCP 预检查：当前未解析到可用服务",
+        okCount > 0 || totalServers === 0 ? "info" : "error"
+      );
+      return result;
+    } catch (error) {
+      const detail = getErrorMessage(error);
+      setMcpPreview({
+        loading: false,
+        error: detail,
+        servers: []
+      });
+      const result: McpHealthCache = {
+        key: cacheKey,
+        checkedAt: now,
+        servers: [],
+        error: detail
+      };
+      mcpHealthCacheRef.current = result;
+      showToast(`MCP 预检查失败：${detail}`, "error");
+      return result;
+    }
+  }
+
   async function runChatSubmission(mode: ChatModeId, submission: QueuedChatSubmission) {
     const config = CHAT_MODES[mode];
     const assistantId = createId("assistant");
@@ -773,6 +1015,7 @@ export default function App() {
     }));
 
     try {
+      await runPreChatMcpHealthCheck();
       const history = chatsRef.current[mode].history;
       let result: ChatTurnResult;
 
@@ -1326,11 +1569,15 @@ export default function App() {
                     brandTitle={draftBrandTitle}
                     brandSubtitle={draftBrandSubtitle}
                     health={health}
+                    mcpPreview={mcpPreview}
                     maxIterations={draftMaxIterations}
                     maxTokens={draftMaxTokens}
                     memoryMaintenanceSystemPrompt={draftMemoryMaintenanceSystemPrompt}
                     memoryMaintenanceUserPrompt={draftMemoryMaintenanceUserPrompt}
                     memoryUserId={draftMemoryUserId}
+                    mcpConfigPath={draftMcpConfigPath}
+                    mcpBaseUrls={draftMcpBaseUrls}
+                    mcpDisabledUrls={draftMcpDisabledUrls}
                     modelId={draftModelId}
                     promptPreview={promptPreview}
                     skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
@@ -1346,14 +1593,44 @@ export default function App() {
                     onMemoryMaintenanceSystemPromptChange={setDraftMemoryMaintenanceSystemPrompt}
                     onMemoryMaintenanceUserPromptChange={setDraftMemoryMaintenanceUserPrompt}
                     onMemoryUserIdChange={setDraftMemoryUserId}
+                    onMcpConfigPathChange={setDraftMcpConfigPath}
+                    onMcpBaseUrlsChange={setDraftMcpBaseUrls}
+                    onMcpDisabledUrlsChange={setDraftMcpDisabledUrls}
                     onModelIdChange={setDraftModelId}
+                    onCopyMcpServer={(server, disabled) => {
+                      void copyMcpServer(server, disabled).catch((error) => {
+                        showToast(getErrorMessage(error), "error");
+                      });
+                    }}
+                    onCopyVisibleMcpTools={(servers, disabledUrls) => {
+                      void copyVisibleMcpTools(servers, disabledUrls).catch((error) => {
+                        showToast(getErrorMessage(error), "error");
+                      });
+                    }}
                     onSkillLearningSystemPromptChange={setDraftSkillLearningSystemPrompt}
                     onSkillLearningUserPromptChange={setDraftSkillLearningUserPrompt}
+                    onTestMcp={async () => {
+                      try {
+                        setMcpPreview((current) => ({ ...current, loading: true, error: "" }));
+                        const result = await testMcpConnection();
+                        showToast(`MCP 检测完成：${result.okCount}/${result.totalServers} 可用，共 ${result.totalTools} 个工具`, result.okCount > 0 ? "success" : "error");
+                      } catch (error) {
+                        setMcpPreview({
+                          loading: false,
+                          error: getErrorMessage(error),
+                          servers: []
+                        });
+                        showToast(getErrorMessage(error), "error");
+                      }
+                    }}
                     onReset={() => {
                       setDraftApiBase(DEFAULT_SETTINGS.apiBase);
                       setDraftBrandTitle(DEFAULT_SETTINGS.brandTitle);
                       setDraftBrandSubtitle(DEFAULT_SETTINGS.brandSubtitle);
                       setDraftMemoryUserId(DEFAULT_SETTINGS.memoryUserId);
+                      setDraftMcpConfigPath(DEFAULT_SETTINGS.mcpConfigPath);
+                      setDraftMcpBaseUrls(DEFAULT_SETTINGS.mcpBaseUrls);
+                      setDraftMcpDisabledUrls(DEFAULT_SETTINGS.mcpDisabledUrls);
                       setDraftAgentPromptAppend(DEFAULT_SETTINGS.agentPromptAppend);
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
                       setDraftTemperature(DEFAULT_SETTINGS.temperature);
@@ -1373,6 +1650,9 @@ export default function App() {
                           brandTitle: draftBrandTitle.trim() || DEFAULT_SETTINGS.brandTitle,
                           brandSubtitle: draftBrandSubtitle.trim() || DEFAULT_SETTINGS.brandSubtitle,
                           memoryUserId: draftMemoryUserId.trim() || DEFAULT_SETTINGS.memoryUserId,
+                          mcpConfigPath: draftMcpConfigPath.trim(),
+                          mcpBaseUrls: draftMcpBaseUrls.trim(),
+                          mcpDisabledUrls: normalizeMcpUrlList(draftMcpDisabledUrls),
                           agentPromptAppend: draftAgentPromptAppend.trim(),
                           modelId: draftModelId.trim(),
                           temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
@@ -2333,7 +2613,11 @@ function SettingsWorkspace(props: {
   brandTitle: string;
   brandSubtitle: string;
   health: HealthState;
+  mcpPreview: McpPreviewState;
   memoryUserId: string;
+  mcpConfigPath: string;
+  mcpBaseUrls: string;
+  mcpDisabledUrls: string[];
   modelId: string;
   promptPreview: PromptPreviewState;
   temperature: string;
@@ -2349,7 +2633,11 @@ function SettingsWorkspace(props: {
   onBrandTitleChange: (value: string) => void;
   onBrandSubtitleChange: (value: string) => void;
   onMemoryUserIdChange: (value: string) => void;
+  onMcpConfigPathChange: (value: string) => void;
+  onMcpBaseUrlsChange: (value: string) => void;
+  onMcpDisabledUrlsChange: (value: string[]) => void;
   onModelIdChange: (value: string) => void;
+  onTestMcp: () => void;
   onTemperatureChange: (value: string) => void;
   onMaxTokensChange: (value: string) => void;
   onMaxIterationsChange: (value: string) => void;
@@ -2358,6 +2646,8 @@ function SettingsWorkspace(props: {
   onMemoryMaintenanceUserPromptChange: (value: string) => void;
   onSkillLearningSystemPromptChange: (value: string) => void;
   onSkillLearningUserPromptChange: (value: string) => void;
+  onCopyMcpServer: (server: McpServerPreview, disabled: boolean) => void;
+  onCopyVisibleMcpTools: (servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>, disabledUrls: string[]) => void;
   onTest: () => void;
   onReset: () => void;
   onSave: () => void;
@@ -2368,11 +2658,15 @@ function SettingsWorkspace(props: {
     brandTitle,
     brandSubtitle,
     health,
+    mcpPreview,
     maxIterations,
     maxTokens,
     memoryMaintenanceSystemPrompt,
     memoryMaintenanceUserPrompt,
     memoryUserId,
+    mcpConfigPath,
+    mcpBaseUrls,
+    mcpDisabledUrls,
     modelId,
     promptPreview,
     skillLearningSystemPrompt,
@@ -2388,15 +2682,54 @@ function SettingsWorkspace(props: {
     onMemoryMaintenanceSystemPromptChange,
     onMemoryMaintenanceUserPromptChange,
     onMemoryUserIdChange,
+    onMcpConfigPathChange,
+    onMcpBaseUrlsChange,
+    onMcpDisabledUrlsChange,
     onModelIdChange,
+    onCopyMcpServer,
+    onCopyVisibleMcpTools,
     onReset,
     onSave,
     onSkillLearningSystemPromptChange,
     onSkillLearningUserPromptChange,
+    onTestMcp,
     onTemperatureChange,
     onTest,
     onTopPChange
   } = props;
+
+  const [toolSearch, setToolSearch] = useState("");
+  const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({});
+  const normalizedSearch = toolSearch.trim().toLowerCase();
+  const visibleServers = mcpPreview.servers
+    .map((server) => {
+      const tools = normalizedSearch
+        ? server.tools.filter((tool) => {
+          const haystack = `${tool.name} ${tool.description}`.toLowerCase();
+          return haystack.includes(normalizedSearch);
+        })
+        : server.tools;
+      return { ...server, tools, toolCount: server.toolCount };
+    })
+    .filter((server) => normalizedSearch ? server.tools.length > 0 || !server.ok : true);
+
+  const visibleToolCount = visibleServers.reduce((sum, server) => sum + server.tools.length, 0);
+
+  const toggleServerEnabled = (endpoint: string) => {
+    const normalized = normalizeMcpEndpoint(endpoint);
+    if (isMcpServerDisabled(normalized, mcpDisabledUrls)) {
+      onMcpDisabledUrlsChange(normalizeMcpUrlList(mcpDisabledUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized)));
+      return;
+    }
+    onMcpDisabledUrlsChange(normalizeMcpUrlList([...mcpDisabledUrls, normalized]));
+  };
+
+  const toggleServerCollapsed = (endpoint: string) => {
+    setCollapsedServers((current) => ({
+      ...current,
+      [endpoint]: !current[endpoint]
+    }));
+  };
 
   return (
     <div className="settings-grid">
@@ -2427,6 +2760,19 @@ function SettingsWorkspace(props: {
           <input onChange={(event) => onMemoryUserIdChange(event.target.value)} placeholder={DEFAULT_MEMORY_USER_ID} value={memoryUserId} />
           <small>记忆对话和私有 skills 共用这个 user_id；留空时会回退到默认值 {DEFAULT_MEMORY_USER_ID}。</small>
         </label>
+        <label className="field">
+          <span>MCP 配置文件路径</span>
+          <input onChange={(event) => onMcpConfigPathChange(event.target.value)} placeholder="例如：/path/to/mcp.json" value={mcpConfigPath} />
+          <small>可填写 MCP 配置文件路径，后端会从 mcpServers / servers 中读取多个服务地址。</small>
+        </label>
+        <label className="field">
+          <span>MCP 服务地址列表</span>
+          <textarea onChange={(event) => onMcpBaseUrlsChange(event.target.value)} placeholder={"每行或逗号一个地址，例如：\nhttp://localhost:8444/mcp\nhttp://localhost:8555/mcp"} value={mcpBaseUrls} />
+          <small>支持一次连接多个 MCP；会和上面的配置文件路径一起生效。</small>
+        </label>
+        <div className="empty-block compact">
+          每个 MCP 都可以在下方预览区单独启用 / 禁用。只有启用的 MCP 才会在聊天时暴露给模型。
+        </div>
         <label className="field">
           <span>Agent 提示词追加项</span>
           <textarea onChange={(event) => onAgentPromptAppendChange(event.target.value)} placeholder="补充对主 agent 的长期指令，例如输出风格、回答约束、固定流程。" value={agentPromptAppend} />
@@ -2494,6 +2840,7 @@ function SettingsWorkspace(props: {
         <div className="form-actions">
           <div className="button-row">
             <button className="button secondary" onClick={onTest} type="button">测试连接</button>
+            <button className="button secondary" onClick={onTestMcp} type="button">测试 MCP</button>
             <button className="button ghost" onClick={onReset} type="button">恢复默认</button>
           </div>
           <button className="button primary" onClick={onSave} type="button">保存设置</button>
@@ -2524,6 +2871,16 @@ function SettingsWorkspace(props: {
             <p>记忆模式与私有 skills 使用的默认用户标识。</p>
           </article>
           <article className="stat-card">
+            <div className="soft-chip">MCP</div>
+            <h3>{mcpConfigPath.trim() || "未配置路径"}</h3>
+            <p>{mcpBaseUrls.trim() ? `${parseMcpBaseUrlsInput(mcpBaseUrls).length} 个手动地址` : "未配置手动 MCP 地址"}</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">MCP Tools</div>
+            <h3>{mcpPreview.servers.reduce((sum, server) => sum + server.toolCount, 0)}</h3>
+            <p>{mcpPreview.servers.length ? `${mcpPreview.servers.filter((server) => server.ok).length}/${mcpPreview.servers.length} 个 MCP 可用` : "等待检测 MCP 服务"}</p>
+          </article>
+          <article className="stat-card">
             <div className="soft-chip">LLM Override</div>
             <h3>{modelId || "后端默认模型"}</h3>
             <p>Temp {temperature || "默认"} · Max {maxTokens || "默认"} · Iter {maxIterations || "默认"} · Top P {topP || "默认"}</p>
@@ -2550,6 +2907,123 @@ function SettingsWorkspace(props: {
           </article>
         </div>
         <div className="empty-block">如果你把前端部署到独立域名，目标后端需要允许对应的 CORS 来源；否则浏览器会阻止跨域请求。</div>
+      </section>
+
+      <section className="panel settings-card">
+        <div className="section-head">
+          <div>
+            <h3>MCP 连接与工具预览</h3>
+            <span>可直接查看当前解析出的 MCP 服务列表、连接结果和工具清单。</span>
+          </div>
+          <div className="button-row">
+            <button
+              className="button ghost"
+              onClick={() => setCollapsedServers(
+                Object.fromEntries(mcpPreview.servers.map((server) => [server.endpoint, true]))
+              )}
+              type="button"
+            >
+              全部收起
+            </button>
+            <button
+              className="button ghost"
+              onClick={() => setCollapsedServers({})}
+              type="button"
+            >
+              全部展开
+            </button>
+            <button
+              className="button secondary"
+              disabled={!visibleServers.length}
+              onClick={() => onCopyVisibleMcpTools(visibleServers, mcpDisabledUrls)}
+              type="button"
+            >
+              复制当前工具清单
+            </button>
+          </div>
+        </div>
+        <div className="mcp-toolbar">
+          <label className="field mcp-search-field">
+            <span>工具搜索</span>
+            <input
+              onChange={(event) => setToolSearch(event.target.value)}
+              placeholder="按工具名或描述过滤"
+              value={toolSearch}
+            />
+          </label>
+          <div className="mcp-toolbar-meta">
+            当前显示 {visibleServers.length} 个 MCP，{visibleToolCount} 个工具
+          </div>
+        </div>
+        {mcpPreview.loading ? <div className="processing">正在检测 MCP 服务</div> : null}
+        {mcpPreview.error ? <div className="empty-block">MCP 检测失败：{mcpPreview.error}</div> : null}
+        {!mcpPreview.loading && !mcpPreview.error && !mcpPreview.servers.length ? (
+          <div className="empty-block">当前还没有解析到 MCP 服务。你可以填写 MCP 配置路径，或在上方手动输入多个 MCP 地址。</div>
+        ) : null}
+        {!mcpPreview.loading && visibleServers.length ? (
+          <div className="mcp-preview-list">
+            {visibleServers.map((server) => {
+              const disabled = isMcpServerDisabled(server.endpoint, mcpDisabledUrls);
+              const collapsed = Boolean(collapsedServers[server.endpoint]);
+              return (
+                <article className="mcp-preview-card" key={server.endpoint}>
+                  <div className="mcp-preview-head">
+                    <div>
+                      <h4>{server.endpoint}</h4>
+                      <p>
+                        {disabled
+                          ? `已禁用 · ${server.ok ? `${server.toolCount} 个工具` : "连接失败"}`
+                          : server.ok
+                            ? `已启用 · ${server.toolCount} 个工具`
+                            : "连接失败"}
+                      </p>
+                    </div>
+                    <div className="mcp-card-actions">
+                      <span className={`soft-chip ${server.ok ? "" : "soft-chip-error"}`}>{server.ok ? "OK" : "ERROR"}</span>
+                      <button
+                        className={`button ${disabled ? "ghost" : "secondary"}`}
+                        onClick={() => toggleServerEnabled(server.endpoint)}
+                        type="button"
+                      >
+                        {disabled ? "启用" : "禁用"}
+                      </button>
+                      <button
+                        className="button ghost"
+                        onClick={() => toggleServerCollapsed(server.endpoint)}
+                        type="button"
+                      >
+                        {collapsed ? "展开" : "收起"}
+                      </button>
+                      <button
+                        className="button ghost"
+                        onClick={() => onCopyMcpServer(server, disabled)}
+                        type="button"
+                      >
+                        复制
+                      </button>
+                    </div>
+                  </div>
+                  {server.error ? <div className="empty-block compact">{server.error}</div> : null}
+                  {!collapsed && server.tools.length ? (
+                    <div className="mcp-tool-list">
+                      {server.tools.map((tool) => (
+                        <div className="mcp-tool-item" key={`${server.endpoint}-${tool.name}`}>
+                          <strong>{tool.name}</strong>
+                          <span>{tool.description || "无描述"}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : !collapsed && server.ok ? (
+                    <div className="empty-block compact">该 MCP 当前没有返回工具。</div>
+                  ) : null}
+                </article>
+              );
+            })}
+          </div>
+        ) : null}
+        {!mcpPreview.loading && !visibleServers.length && mcpPreview.servers.length ? (
+          <div className="empty-block">当前筛选条件下没有匹配的 MCP 工具。</div>
+        ) : null}
       </section>
 
       <section className="panel settings-card">
@@ -2636,6 +3110,30 @@ async function fetchPromptPreview(apiBase: string, userId: string) {
 async function fetchAgentPromptSettings(apiBase: string) {
   const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
   const response = await fetch(`${target}/agent/settings/prompts`);
+  if (!response.ok) {
+    throw new Error(await readErrorResponse(response));
+  }
+  return await response.json() as Record<string, unknown>;
+}
+
+async function fetchMcpPreview(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[] = []) {
+  const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
+  const params = new URLSearchParams();
+  const trimmedConfigPath = configPath.trim();
+  if (trimmedConfigPath) {
+    params.set("config_path", trimmedConfigPath);
+  }
+  const baseUrls = parseMcpBaseUrlsInput(rawBaseUrls);
+  if (baseUrls.length) {
+    params.set("base_urls", JSON.stringify(baseUrls));
+  }
+  const normalizedDisabled = normalizeMcpUrlList(disabledUrls);
+  if (normalizedDisabled.length) {
+    params.set("disabled_urls", JSON.stringify(normalizedDisabled));
+  }
+
+  const query = params.toString();
+  const response = await fetch(`${target}/agent/settings/mcp${query ? `?${query}` : ""}`);
   if (!response.ok) {
     throw new Error(await readErrorResponse(response));
   }

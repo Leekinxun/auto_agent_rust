@@ -14,7 +14,7 @@ use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
     AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
-    UploadedFile,
+    McpOverrides, UploadedFile,
 };
 
 pub fn router() -> Router<SharedState> {
@@ -25,11 +25,19 @@ pub fn router() -> Router<SharedState> {
         .route("/memory/run", post(agent_memory_run))
         .route("/memory/stream", post(agent_memory_stream))
         .route("/settings/prompts", get(agent_prompt_settings))
+        .route("/settings/mcp", get(agent_mcp_settings))
 }
 
 #[derive(Debug, Deserialize)]
 struct SystemPromptQuery {
     user_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct McpSettingsQuery {
+    config_path: Option<String>,
+    base_urls: Option<String>,
+    disabled_urls: Option<String>,
 }
 
 async fn agent_system_prompt(
@@ -47,6 +55,23 @@ async fn agent_prompt_settings(
 ) -> ApiResult<Json<crate::domain::chat::models::AgentPromptSettingsPreview>> {
     Ok(Json(
         state.chat_orchestrator.preview_agent_prompt_settings(),
+    ))
+}
+
+async fn agent_mcp_settings(
+    State(state): State<SharedState>,
+    Query(query): Query<McpSettingsQuery>,
+) -> ApiResult<Json<crate::domain::chat::models::McpSettingsPreview>> {
+    let overrides = McpOverrides {
+        config_path: query.config_path.and_then(non_empty),
+        base_urls: parse_mcp_base_urls(query.base_urls.as_deref())?,
+        disabled_urls: parse_mcp_base_urls(query.disabled_urls.as_deref())?,
+    };
+    Ok(Json(
+        state
+            .chat_orchestrator
+            .preview_mcp_settings(overrides)
+            .await?,
     ))
 }
 
@@ -160,6 +185,9 @@ async fn parse_chat_multipart(
     let mut memory_maintenance_user_template: Option<String> = None;
     let mut skill_learning_system: Option<String> = None;
     let mut skill_learning_user_template: Option<String> = None;
+    let mut mcp_config_path: Option<String> = None;
+    let mut mcp_base_urls_json: Option<String> = None;
+    let mut mcp_disabled_urls_json: Option<String> = None;
     let mut files = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
@@ -191,6 +219,9 @@ async fn parse_chat_multipart(
             }
             "skill_learning_system" => skill_learning_system = non_empty(value),
             "skill_learning_user_template" => skill_learning_user_template = non_empty(value),
+            "mcp_config_path" => mcp_config_path = non_empty(value),
+            "mcp_base_urls" => mcp_base_urls_json = non_empty(value),
+            "mcp_disabled_urls" => mcp_disabled_urls_json = non_empty(value),
             _ => {}
         }
     }
@@ -221,6 +252,8 @@ async fn parse_chat_multipart(
             return Err(ApiError::bad_request("max_iterations 必须大于 0"));
         }
     }
+    let mcp_base_urls = parse_mcp_base_urls(mcp_base_urls_json.as_deref())?;
+    let mcp_disabled_urls = parse_mcp_base_urls(mcp_disabled_urls_json.as_deref())?;
 
     Ok(ChatRequest {
         message,
@@ -242,6 +275,11 @@ async fn parse_chat_multipart(
             memory_maintenance_user_template,
             skill_learning_system,
             skill_learning_user_template,
+        },
+        mcp_overrides: McpOverrides {
+            config_path: mcp_config_path,
+            base_urls: mcp_base_urls,
+            disabled_urls: mcp_disabled_urls,
         },
     })
 }
@@ -333,6 +371,23 @@ where
         .parse::<T>()
         .map(Some)
         .map_err(|_| ApiError::bad_request(format!("{label} 格式不正确")))
+}
+
+fn parse_mcp_base_urls(raw: Option<&str>) -> ApiResult<Vec<String>> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    let parsed = serde_json::from_str::<Vec<String>>(raw)
+        .map_err(|_| ApiError::bad_request("mcp_base_urls 必须是字符串数组 JSON"))?;
+
+    let mut seen = std::collections::HashSet::new();
+    Ok(parsed
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| seen.insert(item.clone()))
+        .collect())
 }
 
 fn filesafe_fragment(name: &str) -> String {

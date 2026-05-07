@@ -97,7 +97,10 @@ impl Default for CorsConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct McpConfig {
+    pub config_path: String,
     pub base_url: String,
+    pub base_urls: Vec<String>,
+    pub servers: Vec<McpServerConfig>,
     pub timeout: u64,
     pub connect_timeout: u64,
 }
@@ -105,9 +108,28 @@ pub struct McpConfig {
 impl Default for McpConfig {
     fn default() -> Self {
         Self {
+            config_path: String::new(),
             base_url: "http://localhost:8444/mcp".to_string(),
+            base_urls: Vec::new(),
+            servers: Vec::new(),
             timeout: 60,
             connect_timeout: 10,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct McpServerConfig {
+    pub name: Option<String>,
+    pub base_url: String,
+}
+
+impl Default for McpServerConfig {
+    fn default() -> Self {
+        Self {
+            name: None,
+            base_url: String::new(),
         }
     }
 }

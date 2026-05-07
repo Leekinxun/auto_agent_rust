@@ -86,6 +86,9 @@ export type AppSettings = {
   brandTitle: string;
   brandSubtitle: string;
   memoryUserId: string;
+  mcpConfigPath: string;
+  mcpBaseUrls: string;
+  mcpDisabledUrls: string[];
   agentPromptAppend: string;
   modelId: string;
   temperature: string;
@@ -152,4 +155,17 @@ export type ToastItem = {
   id: string;
   tone: ToastTone;
   message: string;
+};
+
+export type McpToolPreview = {
+  name: string;
+  description: string;
+};
+
+export type McpServerPreview = {
+  endpoint: string;
+  toolCount: number;
+  ok: boolean;
+  error?: string;
+  tools: McpToolPreview[];
 };

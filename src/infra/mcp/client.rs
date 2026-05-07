@@ -1,12 +1,15 @@
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
+use sha1::{Digest, Sha1};
 use tokio::sync::Mutex;
 
 use crate::config::model::AppConfig;
+use crate::domain::chat::models::McpOverrides;
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_CLIENT_NAME: &str = "auto-claude-code-rs";
@@ -15,61 +18,225 @@ const MCP_CLIENT_VERSION: &str = "1.0.0";
 #[derive(Clone)]
 pub struct McpClient {
     http: reqwest::Client,
+    config: McpClientConfig,
+}
+
+#[derive(Clone)]
+struct McpClientConfig {
+    config_path: String,
+    base_urls: Vec<String>,
+}
+
+#[derive(Clone)]
+struct McpEndpointClient {
+    http: reqwest::Client,
     base_url: String,
     session_id: Arc<Mutex<Option<String>>>,
     init_lock: Arc<Mutex<()>>,
 }
 
+#[derive(Debug, Clone)]
+struct NamedToolSchema {
+    full_name: String,
+    schema: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpServerPreview {
+    pub endpoint: String,
+    pub ok: bool,
+    pub tool_count: usize,
+    pub tools: Vec<McpToolPreview>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct McpToolPreview {
+    pub name: String,
+    pub description: String,
+}
+
 impl McpClient {
     pub fn new(config: &AppConfig) -> Result<Self> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(config.mcp.timeout))
-            .connect_timeout(Duration::from_secs(config.mcp.connect_timeout))
-            .build()
-            .context("failed to build mcp reqwest client")?;
+        let http = build_http_client(config.mcp.timeout, config.mcp.connect_timeout)?;
         Ok(Self {
             http,
-            base_url: config.mcp.base_url.trim().trim_end_matches('/').to_string(),
-            session_id: Arc::new(Mutex::new(None)),
-            init_lock: Arc::new(Mutex::new(())),
+            config: McpClientConfig {
+                config_path: config.mcp.config_path.clone(),
+                base_urls: configured_base_urls(config),
+            },
         })
     }
 
-    pub async fn list_tool_schemas(&self) -> Result<Vec<Value>> {
+    pub async fn list_tool_schemas(&self, overrides: Option<&McpOverrides>) -> Result<Vec<Value>> {
+        let endpoints = self.endpoint_clients(overrides)?;
+        if endpoints.is_empty() {
+            bail!("no MCP endpoints configured");
+        }
+
+        let mut merged = Vec::new();
+        let mut seen = HashSet::new();
+        let mut errors = Vec::new();
+
+        for endpoint in endpoints {
+            match endpoint.list_tool_schemas().await {
+                Ok(schemas) => {
+                    for schema in schemas {
+                        if seen.insert(schema.full_name.clone()) {
+                            merged.push(schema.schema);
+                        }
+                    }
+                }
+                Err(error) => errors.push(format!("{}: {error}", endpoint.base_url)),
+            }
+        }
+
+        if merged.is_empty() {
+            if errors.is_empty() {
+                bail!("no MCP tools available");
+            }
+            bail!(errors.join(" | "));
+        }
+
+        Ok(merged)
+    }
+
+    pub async fn call_tool(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+        overrides: Option<&McpOverrides>,
+    ) -> String {
+        match self.call_tool_inner(tool_name, arguments, overrides).await {
+            Ok(output) => output,
+            Err(error) => format!("[MCP Error] {error}"),
+        }
+    }
+
+    pub async fn inspect_servers(
+        &self,
+        overrides: Option<&McpOverrides>,
+    ) -> Result<Vec<McpServerPreview>> {
+        let endpoints = self.endpoint_clients(overrides)?;
+        if endpoints.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut previews = Vec::with_capacity(endpoints.len());
+        for endpoint in endpoints {
+            match endpoint.list_raw_tools().await {
+                Ok(raw_tools) => {
+                    let tools = raw_tools
+                        .into_iter()
+                        .filter_map(|tool| build_tool_preview(&tool))
+                        .collect::<Vec<_>>();
+                    previews.push(McpServerPreview {
+                        endpoint: endpoint.base_url,
+                        ok: true,
+                        tool_count: tools.len(),
+                        tools,
+                        error: None,
+                    });
+                }
+                Err(error) => previews.push(McpServerPreview {
+                    endpoint: endpoint.base_url,
+                    ok: false,
+                    tool_count: 0,
+                    tools: Vec::new(),
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+
+        Ok(previews)
+    }
+
+    async fn call_tool_inner(
+        &self,
+        tool_name: &str,
+        arguments: Value,
+        overrides: Option<&McpOverrides>,
+    ) -> Result<String> {
+        let endpoints = self.endpoint_clients(overrides)?;
+        if endpoints.is_empty() {
+            bail!("no MCP endpoints configured");
+        }
+
+        let raw_name = tool_name.strip_prefix("mcp_").unwrap_or(tool_name);
+        let (target_key, actual_name) = split_prefixed_tool_name(raw_name);
+
+        if let Some(target_key) = target_key {
+            let endpoint = endpoints
+                .into_iter()
+                .find(|item| endpoint_key(&item.base_url) == target_key)
+                .with_context(|| {
+                    format!("MCP endpoint not found for tool {tool_name}: {target_key}")
+                })?;
+            return endpoint.call_tool(&actual_name, arguments).await;
+        }
+
+        let mut last_error = None;
+        for endpoint in endpoints {
+            match endpoint.call_tool(&actual_name, arguments.clone()).await {
+                Ok(output) => return Ok(output),
+                Err(error) => last_error = Some(format!("{}: {error}", endpoint.base_url)),
+            }
+        }
+
+        bail!(
+            "{}",
+            last_error.unwrap_or_else(|| format!("tool not available: {tool_name}"))
+        )
+    }
+
+    fn endpoint_clients(&self, overrides: Option<&McpOverrides>) -> Result<Vec<McpEndpointClient>> {
+        let base_urls = resolve_effective_base_urls(&self.config, overrides)?;
+        base_urls
+            .into_iter()
+            .map(|base_url| {
+                Ok(McpEndpointClient {
+                    http: self.http.clone(),
+                    base_url,
+                    session_id: Arc::new(Mutex::new(None)),
+                    init_lock: Arc::new(Mutex::new(())),
+                })
+            })
+            .collect()
+    }
+}
+
+impl McpEndpointClient {
+    async fn list_raw_tools(&self) -> Result<Vec<Value>> {
         self.ensure_initialized().await?;
         let response = self.send_request("tools/list", json!({})).await?;
         if let Some(error) = response.get("error") {
             bail!("mcp tools/list error: {error}");
         }
 
-        let tools = response
+        Ok(response
             .get("result")
             .and_then(|value| value.get("tools"))
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default();
+            .unwrap_or_default())
+    }
 
-        Ok(tools
+    async fn list_tool_schemas(&self) -> Result<Vec<NamedToolSchema>> {
+        Ok(self
+            .list_raw_tools()
+            .await?
             .into_iter()
-            .filter_map(|tool| build_tool_schema(&tool))
+            .filter_map(|tool| build_tool_schema(&self.base_url, &tool))
             .collect())
     }
 
-    pub async fn call_tool(&self, tool_name: &str, arguments: Value) -> String {
-        match self.call_tool_inner(tool_name, arguments).await {
-            Ok(output) => output,
-            Err(error) => format!("[MCP Error] {error}"),
-        }
-    }
-
-    async fn call_tool_inner(&self, tool_name: &str, arguments: Value) -> Result<String> {
+    async fn call_tool(&self, tool_name: &str, arguments: Value) -> Result<String> {
         self.ensure_initialized().await?;
-        let actual_name = tool_name.strip_prefix("mcp_").unwrap_or(tool_name);
         let response = self
             .send_request(
                 "tools/call",
                 json!({
-                    "name": actual_name,
+                    "name": tool_name,
                     "arguments": arguments
                 }),
             )
@@ -197,6 +364,184 @@ impl McpClient {
     }
 }
 
+fn build_http_client(timeout: u64, connect_timeout: u64) -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout))
+        .connect_timeout(Duration::from_secs(connect_timeout))
+        .build()
+        .context("failed to build mcp reqwest client")
+}
+
+fn configured_base_urls(config: &AppConfig) -> Vec<String> {
+    let mut urls = Vec::new();
+    if !config.mcp.base_url.trim().is_empty() {
+        urls.push(config.mcp.base_url.clone());
+    }
+    urls.extend(config.mcp.base_urls.clone());
+    urls.extend(
+        config
+            .mcp
+            .servers
+            .iter()
+            .map(|server| server.base_url.clone()),
+    );
+    unique_non_empty(urls)
+}
+
+fn resolve_effective_base_urls(
+    config: &McpClientConfig,
+    overrides: Option<&McpOverrides>,
+) -> Result<Vec<String>> {
+    let mut urls = config.base_urls.clone();
+
+    if let Some(overrides) = overrides {
+        urls.extend(overrides.base_urls.clone());
+        if let Some(path) = overrides
+            .config_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            urls.extend(load_mcp_urls_from_path(path)?);
+        }
+    } else if !config.config_path.trim().is_empty() {
+        urls.extend(load_mcp_urls_from_path(config.config_path.trim())?);
+    }
+
+    let mut urls = unique_non_empty(urls);
+    if let Some(overrides) = overrides
+        && !overrides.disabled_urls.is_empty()
+    {
+        let disabled = overrides
+            .disabled_urls
+            .iter()
+            .map(|item| item.trim().trim_end_matches('/').to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<HashSet<_>>();
+        urls.retain(|url| !disabled.contains(url));
+    }
+
+    Ok(urls)
+}
+
+fn load_mcp_urls_from_path(path: &str) -> Result<Vec<String>> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read MCP config path: {path}"))?;
+    let json: Value =
+        serde_json::from_str(&raw).with_context(|| format!("invalid MCP config json at {path}"))?;
+    let urls = extract_mcp_urls(&json);
+    if urls.is_empty() {
+        bail!("MCP config path did not contain any server url entries: {path}");
+    }
+    Ok(urls)
+}
+
+fn extract_mcp_urls(json: &Value) -> Vec<String> {
+    json.get("mcpServers")
+        .or_else(|| json.get("servers"))
+        .and_then(Value::as_object)
+        .map(|servers| {
+            servers
+                .values()
+                .filter_map(|server| {
+                    server
+                        .get("url")
+                        .or_else(|| server.get("base_url"))
+                        .or_else(|| server.get("baseUrl"))
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn unique_non_empty(values: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    values
+        .into_iter()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .filter(|value| seen.insert(value.clone()))
+        .collect()
+}
+
+fn build_tool_schema(base_url: &str, tool: &Value) -> Option<NamedToolSchema> {
+    let name = tool.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    let description = tool
+        .get("description")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let parameters = tool
+        .get("inputSchema")
+        .cloned()
+        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
+    let scoped_endpoint = endpoint_key(base_url);
+    let full_name = format!("mcp_{scoped_endpoint}__{name}");
+
+    Some(NamedToolSchema {
+        full_name: full_name.clone(),
+        schema: json!({
+            "type": "function",
+            "function": {
+                "name": full_name,
+                "description": format!("[MCP {}] {description}", base_url),
+                "parameters": parameters
+            }
+        }),
+    })
+}
+
+fn build_tool_preview(tool: &Value) -> Option<McpToolPreview> {
+    let name = tool.get("name")?.as_str()?.trim();
+    if name.is_empty() {
+        return None;
+    }
+
+    Some(McpToolPreview {
+        name: name.to_string(),
+        description: tool
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn endpoint_key(base_url: &str) -> String {
+    let normalized = base_url.trim().trim_end_matches('/');
+    let readable = normalized
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    let compact = readable
+        .split('_')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>()
+        .join("_");
+    let digest = format!("{:x}", Sha1::digest(normalized.as_bytes()));
+    format!("{compact}_{}", &digest[..8])
+}
+
+fn split_prefixed_tool_name(raw_name: &str) -> (Option<String>, String) {
+    let Some((encoded_endpoint, tool_name)) = raw_name.split_once("__") else {
+        return (None, raw_name.to_string());
+    };
+    (Some(encoded_endpoint.to_string()), tool_name.to_string())
+}
+
 fn parse_response_body(body: &str) -> Result<Value> {
     let trimmed = body.trim();
     if trimmed.is_empty() {
@@ -222,39 +567,18 @@ fn parse_response_body(body: &str) -> Result<Value> {
     bail!("mcp response did not contain json or sse data");
 }
 
-fn build_tool_schema(tool: &Value) -> Option<Value> {
-    let name = tool.get("name")?.as_str()?.trim();
-    if name.is_empty() {
-        return None;
-    }
-
-    let description = tool
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let parameters = tool
-        .get("inputSchema")
-        .cloned()
-        .unwrap_or_else(|| json!({ "type": "object", "properties": {} }));
-
-    Some(json!({
-        "type": "function",
-        "function": {
-            "name": format!("mcp_{name}"),
-            "description": format!("[MCP] {description}"),
-            "parameters": parameters
-        }
-    }))
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{McpClient, build_tool_schema, parse_response_body};
-    use crate::config::model::AppConfig;
+    use super::{
+        McpClient, McpOverrides, build_tool_schema, configured_base_urls, extract_mcp_urls,
+        parse_response_body, resolve_effective_base_urls,
+    };
+    use crate::config::model::{AppConfig, McpServerConfig};
     use axum::Router;
-    use axum::http::StatusCode;
+    use axum::extract::Json as AxumJson;
+    use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use axum::routing::post;
-    use serde_json::json;
+    use serde_json::{Value, json};
     use tokio::net::TcpListener;
 
     #[test]
@@ -273,29 +597,107 @@ mod tests {
     }
 
     #[test]
-    fn converts_mcp_tools_to_openai_function_schema() {
-        let schema = build_tool_schema(&json!({
-            "name": "read_file",
-            "description": "Read a file via MCP",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string" }
-                },
-                "required": ["path"]
+    fn extracts_urls_from_mcp_config_json() {
+        let urls = extract_mcp_urls(&json!({
+            "mcpServers": {
+                "one": { "url": "http://a.example/mcp" },
+                "two": { "baseUrl": "http://b.example/mcp" }
             }
-        }))
+        }));
+        assert_eq!(urls, vec!["http://a.example/mcp", "http://b.example/mcp"]);
+    }
+
+    #[test]
+    fn merges_multiple_configured_sources() {
+        let mut config = AppConfig::default();
+        config.mcp.base_url = "http://one.example/mcp".to_string();
+        config.mcp.base_urls = vec!["http://two.example/mcp".to_string()];
+        config.mcp.servers = vec![McpServerConfig {
+            name: Some("three".to_string()),
+            base_url: "http://three.example/mcp".to_string(),
+        }];
+
+        assert_eq!(
+            configured_base_urls(&config),
+            vec![
+                "http://one.example/mcp",
+                "http://two.example/mcp",
+                "http://three.example/mcp"
+            ]
+        );
+    }
+
+    #[test]
+    fn resolves_override_urls_without_config_path() {
+        let config = super::McpClientConfig {
+            config_path: String::new(),
+            base_urls: vec!["http://one.example/mcp".to_string()],
+        };
+        let overrides = McpOverrides {
+            config_path: None,
+            base_urls: vec!["http://two.example/mcp".to_string()],
+            disabled_urls: Vec::new(),
+        };
+
+        assert_eq!(
+            resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
+            vec!["http://one.example/mcp", "http://two.example/mcp"]
+        );
+    }
+
+    #[test]
+    fn filters_disabled_urls_from_effective_set() {
+        let config = super::McpClientConfig {
+            config_path: String::new(),
+            base_urls: vec![
+                "http://one.example/mcp".to_string(),
+                "http://two.example/mcp/".to_string(),
+            ],
+        };
+        let overrides = McpOverrides {
+            config_path: None,
+            base_urls: vec!["http://three.example/mcp".to_string()],
+            disabled_urls: vec![
+                "http://two.example/mcp".to_string(),
+                "http://three.example/mcp/".to_string(),
+            ],
+        };
+
+        assert_eq!(
+            resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
+            vec!["http://one.example/mcp"]
+        );
+    }
+
+    #[test]
+    fn converts_mcp_tools_to_endpoint_scoped_openai_function_schema() {
+        let schema = build_tool_schema(
+            "http://mcp.example/mcp",
+            &json!({
+                "name": "read_file",
+                "description": "Read a file via MCP",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"]
+                }
+            }),
+        )
         .unwrap();
 
-        assert_eq!(schema["function"]["name"], json!("mcp_read_file"));
+        let name = schema.schema["function"]["name"].as_str().unwrap();
+        assert!(name.starts_with("mcp_"));
+        assert!(name.ends_with("__read_file"));
         assert_eq!(
-            schema["function"]["parameters"]["required"],
+            schema.schema["function"]["parameters"]["required"],
             json!(["path"])
         );
     }
 
     #[tokio::test]
-    async fn degrades_gracefully_when_mcp_server_fails() {
+    async fn degrades_gracefully_when_all_mcp_servers_fail() {
         async fn fail_mcp() -> (StatusCode, &'static str) {
             (StatusCode::INTERNAL_SERVER_ERROR, "mcp offline")
         }
@@ -309,19 +711,90 @@ mod tests {
 
         let mut config = AppConfig::default();
         config.mcp.base_url = format!("http://{addr}");
+        config.mcp.base_urls = vec![format!("http://{addr}")];
         config.mcp.connect_timeout = 1;
         config.mcp.timeout = 1;
         let client = McpClient::new(&config).unwrap();
 
-        let list_err = client.list_tool_schemas().await.unwrap_err().to_string();
+        let list_err = client
+            .list_tool_schemas(None)
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(list_err.contains("500 Internal Server Error"));
 
         let tool_output = client
-            .call_tool("mcp_read_file", json!({"path": "foo"}))
+            .call_tool("mcp_read_file", json!({"path": "foo"}), None)
             .await;
         assert!(tool_output.starts_with("[MCP Error]"));
         assert!(tool_output.contains("500 Internal Server Error"));
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn merges_tools_from_multiple_mcp_servers() {
+        async fn mcp_stub(
+            headers: HeaderMap,
+            AxumJson(payload): AxumJson<Value>,
+        ) -> (HeaderMap, AxumJson<Value>) {
+            let mut response_headers = HeaderMap::new();
+            if !headers.contains_key("mcp-session-id") {
+                response_headers.insert("mcp-session-id", HeaderValue::from_static("demo-session"));
+            }
+
+            let method = payload
+                .get("method")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let body = match method {
+                "initialize" => json!({ "jsonrpc": "2.0", "result": { "capabilities": {} } }),
+                "tools/list" => json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "tools": [{
+                            "name": "echo",
+                            "description": "Echo from stub",
+                            "inputSchema": { "type": "object", "properties": {} }
+                        }]
+                    }
+                }),
+                "tools/call" => json!({
+                    "jsonrpc": "2.0",
+                    "result": {
+                        "content": [{ "type": "text", "text": "ok" }]
+                    }
+                }),
+                _ => json!({ "jsonrpc": "2.0", "error": { "message": "unknown" } }),
+            };
+            (response_headers, AxumJson(body))
+        }
+
+        let listener_a = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_a = listener_a.local_addr().unwrap();
+        let server_a = tokio::spawn(async move {
+            let app = Router::new().route("/", post(mcp_stub));
+            axum::serve(listener_a, app).await.unwrap();
+        });
+
+        let listener_b = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr_b = listener_b.local_addr().unwrap();
+        let server_b = tokio::spawn(async move {
+            let app = Router::new().route("/", post(mcp_stub));
+            axum::serve(listener_b, app).await.unwrap();
+        });
+
+        let mut config = AppConfig::default();
+        config.mcp.base_url = format!("http://{addr_a}");
+        config.mcp.base_urls = vec![format!("http://{addr_b}")];
+        config.mcp.connect_timeout = 1;
+        config.mcp.timeout = 1;
+        let client = McpClient::new(&config).unwrap();
+
+        let tools = client.list_tool_schemas(None).await.unwrap();
+        assert_eq!(tools.len(), 2);
+
+        server_a.abort();
+        server_b.abort();
     }
 }
