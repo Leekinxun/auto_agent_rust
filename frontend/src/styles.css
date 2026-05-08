@@ -420,6 +420,7 @@ button {
 
 .main-chat {
     padding: 16px 20px 18px;
+    scroll-padding-bottom: 180px;
 }
 
 .topbar {
@@ -1571,6 +1572,12 @@ button {
     flex-wrap: wrap;
     justify-content: flex-end;
     align-items: center;
+}
+
+.mcp-mode-switch {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
 }
 
 .mcp-preview-head h4 {

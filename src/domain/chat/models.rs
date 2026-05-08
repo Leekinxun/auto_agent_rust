@@ -40,11 +40,47 @@ pub struct AgentPromptOverrides {
     pub skill_learning_user_template: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum McpExposureMode {
+    Eager,
+    Lazy,
+    Disabled,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct McpOverrides {
     pub config_path: Option<String>,
     pub base_urls: Vec<String>,
     pub disabled_urls: Vec<String>,
+    pub lazy_urls: Vec<String>,
+}
+
+impl McpOverrides {
+    pub fn exposure_mode_for_endpoint(&self, endpoint: &str) -> McpExposureMode {
+        let normalized = normalize_mcp_endpoint(endpoint);
+        if self
+            .disabled_urls
+            .iter()
+            .any(|item| normalize_mcp_endpoint(item) == normalized)
+        {
+            return McpExposureMode::Disabled;
+        }
+        if self
+            .lazy_urls
+            .iter()
+            .any(|item| normalize_mcp_endpoint(item) == normalized)
+        {
+            return McpExposureMode::Lazy;
+        }
+        McpExposureMode::Eager
+    }
+
+    pub fn has_lazy_endpoints(&self) -> bool {
+        self.lazy_urls.iter().any(|item| {
+            self.exposure_mode_for_endpoint(item) == McpExposureMode::Lazy
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +119,8 @@ pub struct McpSettingsPreview {
 #[derive(Debug, Clone, Serialize)]
 pub struct McpServerPreviewDto {
     pub endpoint: String,
+    pub endpoint_key: String,
+    pub mode: McpExposureMode,
     pub ok: bool,
     pub tool_count: usize,
     pub tools: Vec<McpToolPreviewDto>,
@@ -131,6 +169,8 @@ impl From<McpServerPreview> for McpServerPreviewDto {
     fn from(value: McpServerPreview) -> Self {
         Self {
             endpoint: value.endpoint,
+            endpoint_key: value.endpoint_key,
+            mode: value.mode,
             ok: value.ok,
             tool_count: value.tool_count,
             tools: value
@@ -144,4 +184,8 @@ impl From<McpServerPreview> for McpServerPreviewDto {
             error: value.error,
         }
     }
+}
+
+fn normalize_mcp_endpoint(value: &str) -> String {
+    value.trim().trim_end_matches('/').to_string()
 }

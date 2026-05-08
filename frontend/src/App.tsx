@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import type {
   AppSettings,
@@ -8,6 +8,7 @@ import type {
   DisplayMessage,
   HealthState,
   HistoryEntry,
+  McpExposureMode,
   OutputFile,
   ProcessItem,
   QueuedChatSubmission,
@@ -46,7 +47,14 @@ import {
   stripThinkingContent,
   suggestFolder
 } from "./utils";
-import { formatUnreadCount, getScrollButtonLabel, hasScrollButtonUnreadAccent } from "./chatScroll";
+import {
+  formatUnreadCount,
+  getScrollButtonLabel,
+  getViewportFollowDelta,
+  hasScrollButtonUnreadAccent,
+  isBottomWithinFollowThreshold,
+  isNearScrollableBottom
+} from "./chatScroll";
 
 type PromptPreviewState = {
   loading: boolean;
@@ -85,6 +93,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mcpConfigPath: "",
   mcpBaseUrls: "",
   mcpDisabledUrls: [],
+  mcpLazyUrls: [],
   agentPromptAppend: "",
   modelId: "",
   temperature: "",
@@ -105,6 +114,9 @@ const HEALTH_RECHECK_INTERVAL_MS = 15000;
 const MCP_HEALTH_CACHE_MS = 60000;
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160;
 const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 320;
+const STREAMING_REPLY_BOTTOM_THRESHOLD_PX = 24;
+const STREAMING_VIEWPORT_FOLLOW_MARGIN_PX = 24;
+const STREAMING_VIEWPORT_FOLLOW_THRESHOLD_PX = 48;
 
 type ScrollContainer = HTMLElement | Window;
 
@@ -143,12 +155,28 @@ function isMcpServerDisabled(endpoint: string, disabledUrls: string[]) {
   return normalizeMcpUrlList(disabledUrls).includes(normalized);
 }
 
-function buildMcpCacheKey(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[]) {
+function isMcpServerLazy(endpoint: string, lazyUrls: string[]) {
+  const normalized = normalizeMcpEndpoint(endpoint);
+  return normalizeMcpUrlList(lazyUrls).includes(normalized);
+}
+
+function getMcpServerMode(endpoint: string, disabledUrls: string[], lazyUrls: string[]): McpExposureMode {
+  if (isMcpServerDisabled(endpoint, disabledUrls)) {
+    return "disabled";
+  }
+  if (isMcpServerLazy(endpoint, lazyUrls)) {
+    return "lazy";
+  }
+  return "eager";
+}
+
+function buildMcpCacheKey(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[], lazyUrls: string[]) {
   return JSON.stringify({
     apiBase: normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase),
     configPath: configPath.trim(),
     baseUrls: parseMcpBaseUrlsInput(rawBaseUrls),
-    disabledUrls: normalizeMcpUrlList(disabledUrls).sort()
+    disabledUrls: normalizeMcpUrlList(disabledUrls).sort(),
+    lazyUrls: normalizeMcpUrlList(lazyUrls).sort()
   });
 }
 
@@ -210,6 +238,54 @@ function getDistanceToBottom(container: ScrollContainer) {
 
 function isNearBottom(container: ScrollContainer, threshold = AUTO_SCROLL_BOTTOM_THRESHOLD_PX) {
   return getDistanceToBottom(container) <= threshold;
+}
+
+function scrollContainerToBottom(container: ScrollContainer, behavior: ScrollBehavior) {
+  if (isWindowScrollContainer(container)) {
+    const doc = document.documentElement;
+    const body = document.body;
+    const top = Math.max(
+      doc.scrollHeight,
+      body?.scrollHeight ?? 0,
+      doc.offsetHeight,
+      body?.offsetHeight ?? 0
+    );
+    window.scrollTo({ top, behavior });
+    return;
+  }
+
+  container.scrollTo({
+    top: container.scrollHeight,
+    behavior
+  });
+}
+
+function getScrollContainerViewportBounds(container: ScrollContainer) {
+  if (isWindowScrollContainer(container)) {
+    return {
+      top: 0,
+      bottom: window.innerHeight
+    };
+  }
+
+  const rect = container.getBoundingClientRect();
+  return {
+    top: rect.top,
+    bottom: rect.bottom
+  };
+}
+
+function scrollContainerBy(container: ScrollContainer, top: number, behavior: ScrollBehavior) {
+  if (top <= 0) {
+    return;
+  }
+
+  if (isWindowScrollContainer(container)) {
+    window.scrollBy({ top, behavior });
+    return;
+  }
+
+  container.scrollBy({ top, behavior });
 }
 
 function createEditorState(skill?: SkillItem): SkillEditorState {
@@ -356,6 +432,9 @@ function loadSettings(): AppSettings {
       mcpDisabledUrls: Array.isArray(parsed.mcpDisabledUrls)
         ? normalizeMcpUrlList(parsed.mcpDisabledUrls.filter((item): item is string => typeof item === "string"))
         : DEFAULT_SETTINGS.mcpDisabledUrls,
+      mcpLazyUrls: Array.isArray(parsed.mcpLazyUrls)
+        ? normalizeMcpUrlList(parsed.mcpLazyUrls.filter((item): item is string => typeof item === "string"))
+        : DEFAULT_SETTINGS.mcpLazyUrls,
       agentPromptAppend: typeof parsed.agentPromptAppend === "string" ? parsed.agentPromptAppend : DEFAULT_SETTINGS.agentPromptAppend,
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
@@ -488,6 +567,7 @@ export default function App() {
   const [draftMcpConfigPath, setDraftMcpConfigPath] = useState(settings.mcpConfigPath);
   const [draftMcpBaseUrls, setDraftMcpBaseUrls] = useState(settings.mcpBaseUrls);
   const [draftMcpDisabledUrls, setDraftMcpDisabledUrls] = useState<string[]>(settings.mcpDisabledUrls);
+  const [draftMcpLazyUrls, setDraftMcpLazyUrls] = useState<string[]>(settings.mcpLazyUrls);
   const [draftAgentPromptAppend, setDraftAgentPromptAppend] = useState(settings.agentPromptAppend);
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
   const [draftTemperature, setDraftTemperature] = useState(settings.temperature);
@@ -539,6 +619,7 @@ export default function App() {
     setDraftMcpConfigPath(settings.mcpConfigPath);
     setDraftMcpBaseUrls(settings.mcpBaseUrls);
     setDraftMcpDisabledUrls(settings.mcpDisabledUrls);
+    setDraftMcpLazyUrls(settings.mcpLazyUrls);
     setDraftAgentPromptAppend(settings.agentPromptAppend);
     setDraftModelId(settings.modelId);
     setDraftTemperature(settings.temperature);
@@ -666,7 +747,7 @@ export default function App() {
     let cancelled = false;
     setMcpPreview((current) => ({ ...current, loading: true, error: "" }));
 
-    void fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls)
+    void fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls)
       .then((data) => {
         if (cancelled) {
           return;
@@ -691,7 +772,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls]);
+  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls]);
 
   useEffect(() => {
     if (currentView === "skills") {
@@ -739,7 +820,7 @@ export default function App() {
   }
 
   async function testMcpConnection() {
-    const data = await fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls);
+    const data = await fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls);
     const servers = normalizeMcpPreviewServers(data.servers);
     const { okCount, totalServers, totalTools } = summarizeMcpServers(servers);
     setMcpPreview({
@@ -750,11 +831,11 @@ export default function App() {
     return { okCount, totalTools, totalServers };
   }
 
-  async function copyMcpServer(server: McpServerPreview, disabled: boolean) {
+  async function copyMcpServer(server: McpServerPreview, mode: McpExposureMode) {
     await copyTextToClipboard(
       [
         `Endpoint: ${server.endpoint}`,
-        `Enabled: ${disabled ? "no" : "yes"}`,
+        `Mode: ${mode}`,
         `Status: ${server.ok ? "ok" : "error"}`,
         ...(server.error ? [`Error: ${server.error}`] : []),
         ...server.tools.map((tool) => `- ${tool.name}${tool.description ? ` - ${tool.description}` : ""}`)
@@ -763,10 +844,14 @@ export default function App() {
     showToast(`已复制 ${server.endpoint} 的工具清单`, "success");
   }
 
-  async function copyVisibleMcpTools(servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>, disabledUrls: string[]) {
+  async function copyVisibleMcpTools(
+    servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>,
+    disabledUrls: string[],
+    lazyUrls: string[]
+  ) {
     const lines = servers.flatMap((server) => {
-      const enabledLabel = isMcpServerDisabled(server.endpoint, disabledUrls) ? "disabled" : "enabled";
-      const base = [`Endpoint: ${server.endpoint} (${enabledLabel}, ${server.ok ? "ok" : "error"})`];
+      const mode = getMcpServerMode(server.endpoint, disabledUrls, lazyUrls);
+      const base = [`Endpoint: ${server.endpoint} (${mode}, ${server.ok ? "ok" : "error"})`];
       if (server.error) {
         base.push(`Error: ${server.error}`);
       }
@@ -929,7 +1014,8 @@ export default function App() {
       settings.apiBase,
       settings.mcpConfigPath,
       settings.mcpBaseUrls,
-      settings.mcpDisabledUrls
+      settings.mcpDisabledUrls,
+      settings.mcpLazyUrls
     );
     const now = Date.now();
     const cached = mcpHealthCacheRef.current;
@@ -943,7 +1029,8 @@ export default function App() {
         settings.apiBase,
         settings.mcpConfigPath,
         settings.mcpBaseUrls,
-        settings.mcpDisabledUrls
+        settings.mcpDisabledUrls,
+        settings.mcpLazyUrls
       );
       const servers = normalizeMcpPreviewServers(data.servers);
       setMcpPreview({
@@ -1578,6 +1665,7 @@ export default function App() {
                     mcpConfigPath={draftMcpConfigPath}
                     mcpBaseUrls={draftMcpBaseUrls}
                     mcpDisabledUrls={draftMcpDisabledUrls}
+                    mcpLazyUrls={draftMcpLazyUrls}
                     modelId={draftModelId}
                     promptPreview={promptPreview}
                     skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
@@ -1596,14 +1684,15 @@ export default function App() {
                     onMcpConfigPathChange={setDraftMcpConfigPath}
                     onMcpBaseUrlsChange={setDraftMcpBaseUrls}
                     onMcpDisabledUrlsChange={setDraftMcpDisabledUrls}
+                    onMcpLazyUrlsChange={setDraftMcpLazyUrls}
                     onModelIdChange={setDraftModelId}
-                    onCopyMcpServer={(server, disabled) => {
-                      void copyMcpServer(server, disabled).catch((error) => {
+                    onCopyMcpServer={(server, mode) => {
+                      void copyMcpServer(server, mode).catch((error) => {
                         showToast(getErrorMessage(error), "error");
                       });
                     }}
-                    onCopyVisibleMcpTools={(servers, disabledUrls) => {
-                      void copyVisibleMcpTools(servers, disabledUrls).catch((error) => {
+                    onCopyVisibleMcpTools={(servers, disabledUrls, lazyUrls) => {
+                      void copyVisibleMcpTools(servers, disabledUrls, lazyUrls).catch((error) => {
                         showToast(getErrorMessage(error), "error");
                       });
                     }}
@@ -1631,6 +1720,7 @@ export default function App() {
                       setDraftMcpConfigPath(DEFAULT_SETTINGS.mcpConfigPath);
                       setDraftMcpBaseUrls(DEFAULT_SETTINGS.mcpBaseUrls);
                       setDraftMcpDisabledUrls(DEFAULT_SETTINGS.mcpDisabledUrls);
+                      setDraftMcpLazyUrls(DEFAULT_SETTINGS.mcpLazyUrls);
                       setDraftAgentPromptAppend(DEFAULT_SETTINGS.agentPromptAppend);
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
                       setDraftTemperature(DEFAULT_SETTINGS.temperature);
@@ -1653,6 +1743,9 @@ export default function App() {
                           mcpConfigPath: draftMcpConfigPath.trim(),
                           mcpBaseUrls: draftMcpBaseUrls.trim(),
                           mcpDisabledUrls: normalizeMcpUrlList(draftMcpDisabledUrls),
+                          mcpLazyUrls: normalizeMcpUrlList(
+                            draftMcpLazyUrls.filter((item) => !normalizeMcpUrlList(draftMcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
+                          ),
                           agentPromptAppend: draftAgentPromptAppend.trim(),
                           modelId: draftModelId.trim(),
                           temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
@@ -1717,6 +1810,7 @@ function ChatWorkspace(props: {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isComposingRef = useRef(false);
   const scrollContainerRef = useRef<ScrollContainer | null>(null);
+  const latestStreamingReplyRef = useRef<HTMLDivElement | null>(null);
   const shouldAutoFollowRef = useRef(true);
   const forceScrollRef = useRef(false);
   const initializedMessagesRef = useRef(false);
@@ -1728,10 +1822,16 @@ function ChatWorkspace(props: {
   const [unreadTurnCount, setUnreadTurnCount] = useState(0);
 
   const scrollToBottom = (behavior: ScrollBehavior) => {
-    threadEndRef.current?.scrollIntoView({
-      block: "end",
-      behavior
-    });
+    const container = scrollContainerRef.current ?? resolveScrollContainer(threadEndRef.current);
+    scrollContainerRef.current = container;
+    if (container) {
+      scrollContainerToBottom(container, behavior);
+    } else {
+      threadEndRef.current?.scrollIntoView({
+        block: "end",
+        behavior
+      });
+    }
     forceScrollRef.current = false;
     shouldAutoFollowRef.current = true;
     setShowScrollToBottomButton(false);
@@ -1847,6 +1947,38 @@ function ChatWorkspace(props: {
   const showUnreadAccent = hasScrollButtonUnreadAccent(hasUnreadUpdates, unreadTurnCount);
   const scrollButtonLabel = getScrollButtonLabel(hasUnreadUpdates, unreadTurnCount);
   const queuedPreview = chat.queue[0]?.message.trim() || "";
+  const latestStreamingMessageId = [...chat.messages].reverse().find((message) => message.role === "assistant" && message.processing)?.id ?? null;
+
+  useEffect(() => {
+    if (!latestStreamingMessageId || (!forceScrollRef.current && !shouldAutoFollowRef.current)) {
+      return;
+    }
+
+    const container = scrollContainerRef.current ?? resolveScrollContainer(threadEndRef.current);
+    const streamingElement = latestStreamingReplyRef.current;
+    scrollContainerRef.current = container;
+    if (!container || !streamingElement) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const { bottom: visibleBottom } = getScrollContainerViewportBounds(container);
+      const targetBottom = streamingElement.getBoundingClientRect().bottom;
+
+      if (isBottomWithinFollowThreshold(targetBottom, visibleBottom, STREAMING_VIEWPORT_FOLLOW_THRESHOLD_PX)) {
+        return;
+      }
+
+      const followDelta = getViewportFollowDelta(
+        targetBottom,
+        visibleBottom,
+        STREAMING_VIEWPORT_FOLLOW_MARGIN_PX
+      );
+      scrollContainerBy(container, followDelta, "auto");
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [latestStreamingMessageId, chat.messages]);
 
   return (
     <div className="chat-page">
@@ -1856,6 +1988,8 @@ function ChatWorkspace(props: {
             {turns.length ? turns.map((turn) => (
               <ConversationTurnCard
                 key={turn.id}
+                latestStreamingMessageId={latestStreamingMessageId}
+                latestStreamingReplyRef={latestStreamingReplyRef}
                 makeDownloadUrl={makeDownloadUrl}
                 turn={turn}
               />
@@ -1977,6 +2111,70 @@ function ChatWorkspace(props: {
         </div>
       </section>
     </div>
+  );
+}
+
+function StreamingReply(props: {
+  messageId: string;
+  text: string;
+  replyRef?: MutableRefObject<HTMLDivElement | null>;
+}) {
+  const { messageId, text, replyRef } = props;
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const shouldAutoScrollRef = useRef(true);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) {
+      return;
+    }
+
+    shouldAutoScrollRef.current = isNearScrollableBottom(
+      element.scrollHeight,
+      element.scrollTop,
+      element.clientHeight,
+      STREAMING_REPLY_BOTTOM_THRESHOLD_PX
+    );
+
+    const handleScroll = () => {
+      shouldAutoScrollRef.current = isNearScrollableBottom(
+        element.scrollHeight,
+        element.scrollTop,
+        element.clientHeight,
+        STREAMING_REPLY_BOTTOM_THRESHOLD_PX
+      );
+    };
+
+    element.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      element.removeEventListener("scroll", handleScroll);
+    };
+  }, [messageId]);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element || !shouldAutoScrollRef.current) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      element.scrollTop = element.scrollHeight;
+    });
+
+    return () => window.cancelAnimationFrame(frameId);
+  }, [text]);
+
+  return (
+    <div
+      className="plain-text reply-streaming"
+      dangerouslySetInnerHTML={{ __html: escapeWithLineBreaks(text) }}
+      ref={(node) => {
+        containerRef.current = node;
+        if (replyRef) {
+          replyRef.current = node;
+        }
+      }}
+    />
   );
 }
 
@@ -2133,7 +2331,11 @@ function renderProcessItem(item: ProcessItem, index: number) {
   );
 }
 
-function renderAssistantMessageContent(message: DisplayMessage, makeDownloadUrl: (file: OutputFile) => string) {
+function renderAssistantMessageContent(
+  message: DisplayMessage,
+  makeDownloadUrl: (file: OutputFile) => string,
+  streamingReplyRef?: MutableRefObject<HTMLDivElement | null>
+) {
   const downloads = collectDownloadFiles(message);
   const streamingText = stripThinkingContent(message.text);
   const hasVisibleStreamingText = Boolean(streamingText.trim());
@@ -2163,10 +2365,7 @@ function renderAssistantMessageContent(message: DisplayMessage, makeDownloadUrl:
           ) : null}
           {!hasThinkingActivity && !hasVisibleStreamingText ? <div className="processing">Agent 正在处理</div> : null}
           {hasVisibleStreamingText ? (
-            <div
-              className="plain-text reply-streaming"
-              dangerouslySetInnerHTML={{ __html: escapeWithLineBreaks(streamingText) }}
-            />
+            <StreamingReply messageId={message.id} replyRef={streamingReplyRef} text={streamingText} />
           ) : null}
         </>
       ) : (
@@ -2218,8 +2417,10 @@ function renderAssistantMessageContent(message: DisplayMessage, makeDownloadUrl:
 function ConversationTurnCard(props: {
   turn: { id: string; user?: DisplayMessage; assistant?: DisplayMessage };
   makeDownloadUrl: (file: OutputFile) => string;
+  latestStreamingMessageId: string | null;
+  latestStreamingReplyRef: MutableRefObject<HTMLDivElement | null>;
 }) {
-  const { turn, makeDownloadUrl } = props;
+  const { turn, makeDownloadUrl, latestStreamingMessageId, latestStreamingReplyRef } = props;
 
   return (
     <article className="conversation-turn">
@@ -2236,7 +2437,11 @@ function ConversationTurnCard(props: {
           <div className="dialog-avatar">AI</div>
           <div className="dialog-bubble assistant">
             <div className="dialog-label">{turn.assistant.processing ? "回答生成中" : "智能体"}</div>
-            {renderAssistantMessageContent(turn.assistant, makeDownloadUrl)}
+            {renderAssistantMessageContent(
+              turn.assistant,
+              makeDownloadUrl,
+              turn.assistant.id === latestStreamingMessageId ? latestStreamingReplyRef : undefined
+            )}
           </div>
         </section>
       ) : (
@@ -2618,6 +2823,7 @@ function SettingsWorkspace(props: {
   mcpConfigPath: string;
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
+  mcpLazyUrls: string[];
   modelId: string;
   promptPreview: PromptPreviewState;
   temperature: string;
@@ -2636,6 +2842,7 @@ function SettingsWorkspace(props: {
   onMcpConfigPathChange: (value: string) => void;
   onMcpBaseUrlsChange: (value: string) => void;
   onMcpDisabledUrlsChange: (value: string[]) => void;
+  onMcpLazyUrlsChange: (value: string[]) => void;
   onModelIdChange: (value: string) => void;
   onTestMcp: () => void;
   onTemperatureChange: (value: string) => void;
@@ -2646,8 +2853,12 @@ function SettingsWorkspace(props: {
   onMemoryMaintenanceUserPromptChange: (value: string) => void;
   onSkillLearningSystemPromptChange: (value: string) => void;
   onSkillLearningUserPromptChange: (value: string) => void;
-  onCopyMcpServer: (server: McpServerPreview, disabled: boolean) => void;
-  onCopyVisibleMcpTools: (servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>, disabledUrls: string[]) => void;
+  onCopyMcpServer: (server: McpServerPreview, mode: McpExposureMode) => void;
+  onCopyVisibleMcpTools: (
+    servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>,
+    disabledUrls: string[],
+    lazyUrls: string[]
+  ) => void;
   onTest: () => void;
   onReset: () => void;
   onSave: () => void;
@@ -2667,6 +2878,7 @@ function SettingsWorkspace(props: {
     mcpConfigPath,
     mcpBaseUrls,
     mcpDisabledUrls,
+    mcpLazyUrls,
     modelId,
     promptPreview,
     skillLearningSystemPrompt,
@@ -2685,6 +2897,7 @@ function SettingsWorkspace(props: {
     onMcpConfigPathChange,
     onMcpBaseUrlsChange,
     onMcpDisabledUrlsChange,
+    onMcpLazyUrlsChange,
     onModelIdChange,
     onCopyMcpServer,
     onCopyVisibleMcpTools,
@@ -2715,13 +2928,20 @@ function SettingsWorkspace(props: {
 
   const visibleToolCount = visibleServers.reduce((sum, server) => sum + server.tools.length, 0);
 
-  const toggleServerEnabled = (endpoint: string) => {
+  const setServerMode = (endpoint: string, mode: McpExposureMode) => {
     const normalized = normalizeMcpEndpoint(endpoint);
-    if (isMcpServerDisabled(normalized, mcpDisabledUrls)) {
-      onMcpDisabledUrlsChange(normalizeMcpUrlList(mcpDisabledUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized)));
-      return;
-    }
-    onMcpDisabledUrlsChange(normalizeMcpUrlList([...mcpDisabledUrls, normalized]));
+    const nextDisabled = normalizeMcpUrlList(
+      mode === "disabled"
+        ? [...mcpDisabledUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized), normalized]
+        : mcpDisabledUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized)
+    );
+    const nextLazy = normalizeMcpUrlList(
+      mode === "lazy"
+        ? [...mcpLazyUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized), normalized]
+        : mcpLazyUrls.filter((item) => normalizeMcpEndpoint(item) !== normalized)
+    );
+    onMcpDisabledUrlsChange(nextDisabled);
+    onMcpLazyUrlsChange(nextLazy);
   };
 
   const toggleServerCollapsed = (endpoint: string) => {
@@ -2771,7 +2991,7 @@ function SettingsWorkspace(props: {
           <small>支持一次连接多个 MCP；会和上面的配置文件路径一起生效。</small>
         </label>
         <div className="empty-block compact">
-          每个 MCP 都可以在下方预览区单独启用 / 禁用。只有启用的 MCP 才会在聊天时暴露给模型。
+          每个 MCP 都可以单独设置为立即加载 / 按需加载 / 禁用。按需加载的 MCP 默认不会把全部工具暴露给模型，模型需要先搜索再按需激活。
         </div>
         <label className="field">
           <span>Agent 提示词追加项</span>
@@ -2935,7 +3155,7 @@ function SettingsWorkspace(props: {
             <button
               className="button secondary"
               disabled={!visibleServers.length}
-              onClick={() => onCopyVisibleMcpTools(visibleServers, mcpDisabledUrls)}
+              onClick={() => onCopyVisibleMcpTools(visibleServers, mcpDisabledUrls, mcpLazyUrls)}
               type="button"
             >
               复制当前工具清单
@@ -2963,7 +3183,7 @@ function SettingsWorkspace(props: {
         {!mcpPreview.loading && visibleServers.length ? (
           <div className="mcp-preview-list">
             {visibleServers.map((server) => {
-              const disabled = isMcpServerDisabled(server.endpoint, mcpDisabledUrls);
+              const mode = getMcpServerMode(server.endpoint, mcpDisabledUrls, mcpLazyUrls);
               const collapsed = Boolean(collapsedServers[server.endpoint]);
               return (
                 <article className="mcp-preview-card" key={server.endpoint}>
@@ -2971,22 +3191,31 @@ function SettingsWorkspace(props: {
                     <div>
                       <h4>{server.endpoint}</h4>
                       <p>
-                        {disabled
+                        {mode === "disabled"
                           ? `已禁用 · ${server.ok ? `${server.toolCount} 个工具` : "连接失败"}`
-                          : server.ok
-                            ? `已启用 · ${server.toolCount} 个工具`
-                            : "连接失败"}
+                          : mode === "lazy"
+                            ? server.ok
+                              ? `按需加载 · ${server.toolCount} 个工具`
+                              : "按需加载 · 连接失败"
+                            : server.ok
+                              ? `立即加载 · ${server.toolCount} 个工具`
+                              : "立即加载 · 连接失败"}
                       </p>
                     </div>
                     <div className="mcp-card-actions">
                       <span className={`soft-chip ${server.ok ? "" : "soft-chip-error"}`}>{server.ok ? "OK" : "ERROR"}</span>
-                      <button
-                        className={`button ${disabled ? "ghost" : "secondary"}`}
-                        onClick={() => toggleServerEnabled(server.endpoint)}
-                        type="button"
-                      >
-                        {disabled ? "启用" : "禁用"}
-                      </button>
+                      <div className="mcp-mode-switch" role="group" aria-label={`MCP mode for ${server.endpoint}`}>
+                        {(["eager", "lazy", "disabled"] as McpExposureMode[]).map((candidate) => (
+                          <button
+                            className={`button ${mode === candidate ? "secondary" : "ghost"}`}
+                            key={candidate}
+                            onClick={() => setServerMode(server.endpoint, candidate)}
+                            type="button"
+                          >
+                            {candidate === "eager" ? "立即" : candidate === "lazy" ? "按需" : "禁用"}
+                          </button>
+                        ))}
+                      </div>
                       <button
                         className="button ghost"
                         onClick={() => toggleServerCollapsed(server.endpoint)}
@@ -2996,7 +3225,7 @@ function SettingsWorkspace(props: {
                       </button>
                       <button
                         className="button ghost"
-                        onClick={() => onCopyMcpServer(server, disabled)}
+                        onClick={() => onCopyMcpServer(server, mode)}
                         type="button"
                       >
                         复制
@@ -3116,7 +3345,13 @@ async function fetchAgentPromptSettings(apiBase: string) {
   return await response.json() as Record<string, unknown>;
 }
 
-async function fetchMcpPreview(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[] = []) {
+async function fetchMcpPreview(
+  apiBase: string,
+  configPath: string,
+  rawBaseUrls: string,
+  disabledUrls: string[] = [],
+  lazyUrls: string[] = []
+) {
   const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
   const params = new URLSearchParams();
   const trimmedConfigPath = configPath.trim();
@@ -3130,6 +3365,12 @@ async function fetchMcpPreview(apiBase: string, configPath: string, rawBaseUrls:
   const normalizedDisabled = normalizeMcpUrlList(disabledUrls);
   if (normalizedDisabled.length) {
     params.set("disabled_urls", JSON.stringify(normalizedDisabled));
+  }
+  const normalizedLazy = normalizeMcpUrlList(
+    lazyUrls.filter((item) => !normalizedDisabled.includes(normalizeMcpEndpoint(item)))
+  );
+  if (normalizedLazy.length) {
+    params.set("lazy_urls", JSON.stringify(normalizedLazy));
   }
 
   const query = params.toString();

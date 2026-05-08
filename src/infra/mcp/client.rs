@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -9,7 +9,7 @@ use sha1::{Digest, Sha1};
 use tokio::sync::Mutex;
 
 use crate::config::model::AppConfig;
-use crate::domain::chat::models::McpOverrides;
+use crate::domain::chat::models::{McpExposureMode, McpOverrides};
 
 const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 const MCP_CLIENT_NAME: &str = "auto-claude-code-rs";
@@ -44,6 +44,8 @@ struct NamedToolSchema {
 #[derive(Debug, Clone)]
 pub struct McpServerPreview {
     pub endpoint: String,
+    pub endpoint_key: String,
+    pub mode: McpExposureMode,
     pub ok: bool,
     pub tool_count: usize,
     pub tools: Vec<McpToolPreview>,
@@ -54,6 +56,41 @@ pub struct McpServerPreview {
 pub struct McpToolPreview {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LazyToolPreview {
+    pub endpoint: String,
+    pub endpoint_key: String,
+    pub tool_name: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct McpToolSelection {
+    pub activated_endpoint_keys: Vec<String>,
+    pub activated_tools_by_endpoint: HashMap<String, Vec<String>>,
+}
+
+impl McpToolSelection {
+    pub fn activate(&mut self, endpoint_key: &str, tool_names: &[String]) {
+        if !self
+            .activated_endpoint_keys
+            .iter()
+            .any(|item| item == endpoint_key)
+        {
+            self.activated_endpoint_keys.push(endpoint_key.to_string());
+        }
+        let entry = self
+            .activated_tools_by_endpoint
+            .entry(endpoint_key.to_string())
+            .or_default();
+        for tool_name in tool_names {
+            if !entry.iter().any(|item| item == tool_name) {
+                entry.push(tool_name.clone());
+            }
+        }
+    }
 }
 
 impl McpClient {
@@ -68,7 +105,11 @@ impl McpClient {
         })
     }
 
-    pub async fn list_tool_schemas(&self, overrides: Option<&McpOverrides>) -> Result<Vec<Value>> {
+    pub async fn list_tool_schemas(
+        &self,
+        overrides: Option<&McpOverrides>,
+        selection: Option<&McpToolSelection>,
+    ) -> Result<Vec<Value>> {
         let endpoints = self.endpoint_clients(overrides)?;
         if endpoints.is_empty() {
             bail!("no MCP endpoints configured");
@@ -77,11 +118,24 @@ impl McpClient {
         let mut merged = Vec::new();
         let mut seen = HashSet::new();
         let mut errors = Vec::new();
+        let mut inspected_any = false;
 
         for endpoint in endpoints {
+            if !should_expose_endpoint_tools(&endpoint.base_url, overrides, selection) {
+                continue;
+            }
+            inspected_any = true;
             match endpoint.list_tool_schemas().await {
                 Ok(schemas) => {
                     for schema in schemas {
+                        if !should_include_tool_schema(
+                            &endpoint.base_url,
+                            &schema.full_name,
+                            overrides,
+                            selection,
+                        ) {
+                            continue;
+                        }
                         if seen.insert(schema.full_name.clone()) {
                             merged.push(schema.schema);
                         }
@@ -89,6 +143,10 @@ impl McpClient {
                 }
                 Err(error) => errors.push(format!("{}: {error}", endpoint.base_url)),
             }
+        }
+
+        if !inspected_any {
+            return Ok(Vec::new());
         }
 
         if merged.is_empty() {
@@ -106,8 +164,12 @@ impl McpClient {
         tool_name: &str,
         arguments: Value,
         overrides: Option<&McpOverrides>,
+        selection: Option<&McpToolSelection>,
     ) -> String {
-        match self.call_tool_inner(tool_name, arguments, overrides).await {
+        match self
+            .call_tool_inner(tool_name, arguments, overrides, selection)
+            .await
+        {
             Ok(output) => output,
             Err(error) => format!("[MCP Error] {error}"),
         }
@@ -131,7 +193,11 @@ impl McpClient {
                         .filter_map(|tool| build_tool_preview(&tool))
                         .collect::<Vec<_>>();
                     previews.push(McpServerPreview {
-                        endpoint: endpoint.base_url,
+                        endpoint: endpoint.base_url.clone(),
+                        endpoint_key: endpoint_key(&endpoint.base_url),
+                        mode: overrides
+                            .map(|value| value.exposure_mode_for_endpoint(&endpoint.base_url))
+                            .unwrap_or(McpExposureMode::Eager),
                         ok: true,
                         tool_count: tools.len(),
                         tools,
@@ -139,7 +205,11 @@ impl McpClient {
                     });
                 }
                 Err(error) => previews.push(McpServerPreview {
-                    endpoint: endpoint.base_url,
+                    endpoint: endpoint.base_url.clone(),
+                    endpoint_key: endpoint_key(&endpoint.base_url),
+                    mode: overrides
+                        .map(|value| value.exposure_mode_for_endpoint(&endpoint.base_url))
+                        .unwrap_or(McpExposureMode::Eager),
                     ok: false,
                     tool_count: 0,
                     tools: Vec::new(),
@@ -151,11 +221,54 @@ impl McpClient {
         Ok(previews)
     }
 
+    pub async fn search_lazy_tool_candidates(
+        &self,
+        overrides: Option<&McpOverrides>,
+        query: &str,
+    ) -> Result<Vec<LazyToolPreview>> {
+        let endpoints = self.endpoint_clients(overrides)?;
+        let normalized_query = query.trim().to_ascii_lowercase();
+        let mut matches = Vec::new();
+
+        for endpoint in endpoints {
+            let Some(overrides) = overrides else {
+                continue;
+            };
+            if overrides.exposure_mode_for_endpoint(&endpoint.base_url) != McpExposureMode::Lazy {
+                continue;
+            }
+            let endpoint_key = endpoint_key(&endpoint.base_url);
+            let raw_tools = endpoint.list_raw_tools().await?;
+            for tool in raw_tools {
+                let Some(preview) = build_tool_preview(&tool) else {
+                    continue;
+                };
+                let haystack = format!(
+                    "{} {} {}",
+                    endpoint.base_url, preview.name, preview.description
+                )
+                .to_ascii_lowercase();
+                if !normalized_query.is_empty() && !haystack.contains(&normalized_query) {
+                    continue;
+                }
+                matches.push(LazyToolPreview {
+                    endpoint: endpoint.base_url.clone(),
+                    endpoint_key: endpoint_key.clone(),
+                    tool_name: preview.name,
+                    description: preview.description,
+                });
+            }
+        }
+
+        Ok(matches)
+    }
+
     async fn call_tool_inner(
         &self,
         tool_name: &str,
         arguments: Value,
         overrides: Option<&McpOverrides>,
+        selection: Option<&McpToolSelection>,
     ) -> Result<String> {
         let endpoints = self.endpoint_clients(overrides)?;
         if endpoints.is_empty() {
@@ -172,11 +285,17 @@ impl McpClient {
                 .with_context(|| {
                     format!("MCP endpoint not found for tool {tool_name}: {target_key}")
                 })?;
+            if !should_expose_endpoint_tools(&endpoint.base_url, overrides, selection) {
+                bail!("MCP endpoint not activated for tool {tool_name}: {target_key}");
+            }
             return endpoint.call_tool(&actual_name, arguments).await;
         }
 
         let mut last_error = None;
         for endpoint in endpoints {
+            if !should_expose_endpoint_tools(&endpoint.base_url, overrides, selection) {
+                continue;
+            }
             match endpoint.call_tool(&actual_name, arguments.clone()).await {
                 Ok(output) => return Ok(output),
                 Err(error) => last_error = Some(format!("{}: {error}", endpoint.base_url)),
@@ -436,6 +555,69 @@ fn load_mcp_urls_from_path(path: &str) -> Result<Vec<String>> {
     Ok(urls)
 }
 
+fn should_expose_endpoint_tools(
+    endpoint: &str,
+    overrides: Option<&McpOverrides>,
+    selection: Option<&McpToolSelection>,
+) -> bool {
+    let Some(overrides) = overrides else {
+        return true;
+    };
+    match overrides.exposure_mode_for_endpoint(endpoint) {
+        McpExposureMode::Disabled => false,
+        McpExposureMode::Eager => true,
+        McpExposureMode::Lazy => selection
+            .map(|value| {
+                value
+                    .activated_endpoint_keys
+                    .iter()
+                    .any(|item| item == &endpoint_key(endpoint))
+            })
+            .unwrap_or(false),
+    }
+}
+
+fn should_include_tool_schema(
+    endpoint: &str,
+    full_tool_name: &str,
+    overrides: Option<&McpOverrides>,
+    selection: Option<&McpToolSelection>,
+) -> bool {
+    let Some(overrides) = overrides else {
+        return true;
+    };
+    match overrides.exposure_mode_for_endpoint(endpoint) {
+        McpExposureMode::Disabled => false,
+        McpExposureMode::Eager => true,
+        McpExposureMode::Lazy => {
+            let Some(selection) = selection else {
+                return false;
+            };
+            if selection.activated_endpoint_keys.is_empty() {
+                return false;
+            }
+            let current_key = endpoint_key(endpoint);
+            if !selection
+                .activated_endpoint_keys
+                .iter()
+                .any(|item| item == &current_key)
+            {
+                return false;
+            }
+            let Some(activated_names) = selection.activated_tools_by_endpoint.get(&current_key) else {
+                return false;
+            };
+            if activated_names.is_empty() {
+                return true;
+            }
+            let (_, actual_name) = split_prefixed_tool_name(
+                full_tool_name.strip_prefix("mcp_").unwrap_or(full_tool_name),
+            );
+            activated_names.iter().any(|item| item == &actual_name)
+        }
+    }
+}
+
 fn extract_mcp_urls(json: &Value) -> Vec<String> {
     json.get("mcpServers")
         .or_else(|| json.get("servers"))
@@ -637,6 +819,7 @@ mod tests {
             config_path: None,
             base_urls: vec!["http://two.example/mcp".to_string()],
             disabled_urls: Vec::new(),
+            lazy_urls: Vec::new(),
         };
 
         assert_eq!(
@@ -661,6 +844,7 @@ mod tests {
                 "http://two.example/mcp".to_string(),
                 "http://three.example/mcp/".to_string(),
             ],
+            lazy_urls: Vec::new(),
         };
 
         assert_eq!(
@@ -717,14 +901,14 @@ mod tests {
         let client = McpClient::new(&config).unwrap();
 
         let list_err = client
-            .list_tool_schemas(None)
+            .list_tool_schemas(None, None)
             .await
             .unwrap_err()
             .to_string();
         assert!(list_err.contains("500 Internal Server Error"));
 
         let tool_output = client
-            .call_tool("mcp_read_file", json!({"path": "foo"}), None)
+            .call_tool("mcp_read_file", json!({"path": "foo"}), None, None)
             .await;
         assert!(tool_output.starts_with("[MCP Error]"));
         assert!(tool_output.contains("500 Internal Server Error"));
@@ -791,7 +975,7 @@ mod tests {
         config.mcp.timeout = 1;
         let client = McpClient::new(&config).unwrap();
 
-        let tools = client.list_tool_schemas(None).await.unwrap();
+        let tools = client.list_tool_schemas(None, None).await.unwrap();
         assert_eq!(tools.len(), 2);
 
         server_a.abort();

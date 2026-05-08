@@ -81,6 +81,8 @@ export type HealthState = {
   label: string;
 };
 
+export type McpExposureMode = "eager" | "lazy" | "disabled";
+
 export type AppSettings = {
   apiBase: string;
   brandTitle: string;
@@ -89,6 +91,7 @@ export type AppSettings = {
   mcpConfigPath: string;
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
+  mcpLazyUrls: string[];
   agentPromptAppend: string;
   modelId: string;
   temperature: string;
@@ -164,6 +167,8 @@ export type McpToolPreview = {
 
 export type McpServerPreview = {
   endpoint: string;
+  endpointKey: string;
+  mode: McpExposureMode;
   toolCount: number;
   ok: boolean;
   error?: string;

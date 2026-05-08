@@ -38,6 +38,7 @@ struct McpSettingsQuery {
     config_path: Option<String>,
     base_urls: Option<String>,
     disabled_urls: Option<String>,
+    lazy_urls: Option<String>,
 }
 
 async fn agent_system_prompt(
@@ -66,6 +67,7 @@ async fn agent_mcp_settings(
         config_path: query.config_path.and_then(non_empty),
         base_urls: parse_mcp_base_urls(query.base_urls.as_deref())?,
         disabled_urls: parse_mcp_base_urls(query.disabled_urls.as_deref())?,
+        lazy_urls: parse_mcp_base_urls(query.lazy_urls.as_deref())?,
     };
     Ok(Json(
         state
@@ -188,6 +190,7 @@ async fn parse_chat_multipart(
     let mut mcp_config_path: Option<String> = None;
     let mut mcp_base_urls_json: Option<String> = None;
     let mut mcp_disabled_urls_json: Option<String> = None;
+    let mut mcp_lazy_urls_json: Option<String> = None;
     let mut files = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
@@ -222,6 +225,7 @@ async fn parse_chat_multipart(
             "mcp_config_path" => mcp_config_path = non_empty(value),
             "mcp_base_urls" => mcp_base_urls_json = non_empty(value),
             "mcp_disabled_urls" => mcp_disabled_urls_json = non_empty(value),
+            "mcp_lazy_urls" => mcp_lazy_urls_json = non_empty(value),
             _ => {}
         }
     }
@@ -254,6 +258,7 @@ async fn parse_chat_multipart(
     }
     let mcp_base_urls = parse_mcp_base_urls(mcp_base_urls_json.as_deref())?;
     let mcp_disabled_urls = parse_mcp_base_urls(mcp_disabled_urls_json.as_deref())?;
+    let mcp_lazy_urls = parse_mcp_base_urls(mcp_lazy_urls_json.as_deref())?;
 
     Ok(ChatRequest {
         message,
@@ -280,6 +285,7 @@ async fn parse_chat_multipart(
             config_path: mcp_config_path,
             base_urls: mcp_base_urls,
             disabled_urls: mcp_disabled_urls,
+            lazy_urls: mcp_lazy_urls,
         },
     })
 }

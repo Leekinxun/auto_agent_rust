@@ -56,6 +56,7 @@ describe("frontend chat surface", () => {
         mcpConfigPath: "/tmp/mcp.json",
         mcpBaseUrls: "http://mcp-a.example/mcp\nhttp://mcp-b.example/mcp",
         mcpDisabledUrls: ["http://mcp-b.example/mcp"],
+        mcpLazyUrls: ["http://mcp-a.example/mcp"],
         agentPromptAppend: "extra prompt",
         modelId: "demo-model",
         temperature: "0.2",
@@ -73,6 +74,7 @@ describe("frontend chat surface", () => {
     expect(formData.get("mcp_config_path")).toBe("/tmp/mcp.json");
     expect(formData.get("mcp_base_urls")).toBe("[\"http://mcp-a.example/mcp\",\"http://mcp-b.example/mcp\"]");
     expect(formData.get("mcp_disabled_urls")).toBe("[\"http://mcp-b.example/mcp\"]");
+    expect(formData.get("mcp_lazy_urls")).toBe("[\"http://mcp-a.example/mcp\"]");
     expect(formData.get("system_append")).toBe("extra prompt");
     expect(formData.get("memory_maintenance_system")).toBe("memory sys");
     expect(formData.get("skill_learning_user_template")).toBe("skill user");
@@ -117,6 +119,8 @@ describe("frontend chat surface", () => {
     expect(normalizeMcpPreviewServers([
       {
         endpoint: "http://a/mcp",
+        endpoint_key: "demo_key",
+        mode: "lazy",
         ok: true,
         tool_count: 2,
         tools: [
@@ -127,6 +131,8 @@ describe("frontend chat surface", () => {
     ])).toEqual([
       {
         endpoint: "http://a/mcp",
+        endpointKey: "demo_key",
+        mode: "lazy",
         ok: true,
         toolCount: 2,
         tools: [

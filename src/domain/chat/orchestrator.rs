@@ -32,9 +32,12 @@ use crate::infra::llm::types::{
     ChatCompletionRequest, ChatMessage, StreamChunk, ToolCall, ToolCallAccumulator,
 };
 use crate::infra::mcp::client::McpClient;
+use crate::infra::mcp::client::McpToolSelection;
 
 const PAST_CONTEXT_TAG: &str = "past_context";
 const PAST_CONTEXT_ACK: &str = "Noted. I'll reference this context only if relevant.";
+const SEARCH_LAZY_MCP_TOOLS_TOOL: &str = "search_lazy_mcp_tools";
+const ACTIVATE_LAZY_MCP_TOOLS_TOOL: &str = "activate_lazy_mcp_tools";
 
 #[derive(Clone)]
 pub struct ChatOrchestrator {
@@ -80,12 +83,7 @@ impl ChatOrchestrator {
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
-        let tools = self
-            .load_public_tools_with_overrides(
-                prepared.session.is_some(),
-                Some(&prepared.mcp_overrides),
-            )
-            .await;
+        let mut mcp_tool_selection = McpToolSelection::default();
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
@@ -98,11 +96,18 @@ impl ChatOrchestrator {
             }
             self.inject_session_messages(&mut messages, prepared.session.as_deref())
                 .await?;
+            let tools = self
+                .load_public_tools_with_overrides(
+                    prepared.session.is_some(),
+                    Some(&prepared.mcp_overrides),
+                    &mcp_tool_selection,
+                )
+                .await;
             let response = self
                 .llm_client
                 .chat(&self.build_llm_request_options(
                     messages.clone(),
-                    Some(tools.clone()),
+                    Some(tools),
                     false,
                     &prepared.llm_overrides,
                 )?)
@@ -130,6 +135,7 @@ impl ChatOrchestrator {
                         prepared.user_id.as_deref(),
                         matches!(mode, ChatMode::Memory),
                         &prepared.mcp_overrides,
+                        &mut mcp_tool_selection,
                         &mut skill_usages,
                     )
                     .await;
@@ -204,12 +210,7 @@ impl ChatOrchestrator {
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
         let mut messages = prepared.messages;
-        let tools = self
-            .load_public_tools_with_overrides(
-                prepared.session.is_some(),
-                Some(&prepared.mcp_overrides),
-            )
-            .await;
+        let mut mcp_tool_selection = McpToolSelection::default();
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
 
@@ -225,9 +226,16 @@ impl ChatOrchestrator {
             }
             self.inject_session_messages(&mut messages, prepared.session.as_deref())
                 .await?;
+            let tools = self
+                .load_public_tools_with_overrides(
+                    prepared.session.is_some(),
+                    Some(&prepared.mcp_overrides),
+                    &mcp_tool_selection,
+                )
+                .await;
             let request_body = self.build_llm_request_options(
                 messages.clone(),
-                Some(tools.clone()),
+                Some(tools),
                 true,
                 &prepared.llm_overrides,
             )?;
@@ -372,6 +380,7 @@ impl ChatOrchestrator {
                         prepared.user_id.as_deref(),
                         matches!(mode, ChatMode::Memory),
                         &prepared.mcp_overrides,
+                        &mut mcp_tool_selection,
                         &mut skill_usages,
                     )
                     .await;
@@ -604,13 +613,21 @@ impl ChatOrchestrator {
         &self,
         include_session_tools: bool,
         mcp_overrides: Option<&crate::domain::chat::models::McpOverrides>,
+        mcp_tool_selection: &McpToolSelection,
     ) -> Vec<serde_json::Value> {
         let mut tools = static_public_tool_schemas(include_session_tools);
-        match self.mcp_client.list_tool_schemas(mcp_overrides).await {
+        match self
+            .mcp_client
+            .list_tool_schemas(mcp_overrides, Some(mcp_tool_selection))
+            .await
+        {
             Ok(mcp_tools) => tools.extend(mcp_tools),
             Err(error) => {
                 tracing::warn!(?error, "failed to load mcp tools; continuing without them")
             }
+        }
+        if mcp_overrides.is_some_and(|overrides| overrides.has_lazy_endpoints()) {
+            tools.extend(lazy_mcp_control_tool_schemas());
         }
         tools
     }
@@ -622,6 +639,7 @@ impl ChatOrchestrator {
         user_id: Option<&str>,
         memory_mode: bool,
         mcp_overrides: &crate::domain::chat::models::McpOverrides,
+        mcp_tool_selection: &mut McpToolSelection,
         skill_usages: &mut Vec<SkillUsage>,
     ) -> String {
         let arguments = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
@@ -631,7 +649,12 @@ impl ChatOrchestrator {
         if tool_name.starts_with("mcp_") {
             return self
                 .mcp_client
-                .call_tool(tool_name, arguments, Some(mcp_overrides))
+                .call_tool(
+                    tool_name,
+                    arguments,
+                    Some(mcp_overrides),
+                    Some(mcp_tool_selection),
+                )
                 .await;
         }
 
@@ -716,6 +739,11 @@ impl ChatOrchestrator {
                     skill.body
                 ))
             })(),
+            SEARCH_LAZY_MCP_TOOLS_TOOL => self.search_lazy_mcp_tools(&arguments, mcp_overrides).await,
+            ACTIVATE_LAZY_MCP_TOOLS_TOOL => {
+                self.activate_lazy_mcp_tools(&arguments, mcp_overrides, mcp_tool_selection)
+                    .await
+            }
             other => Ok(format!("Unknown tool: {other}")),
         };
 
@@ -765,8 +793,117 @@ impl ChatOrchestrator {
                     "file_type": file_type,
                 }),
                 Some(mcp_overrides),
+                None,
             )
             .await
+    }
+
+    async fn search_lazy_mcp_tools(
+        &self,
+        arguments: &serde_json::Value,
+        mcp_overrides: &crate::domain::chat::models::McpOverrides,
+    ) -> Result<String> {
+        let query = arguments
+            .get("query")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("search_lazy_mcp_tools requires a non-empty query")?;
+        let endpoint_key_filter = arguments
+            .get("endpoint_key")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        let mut matches = self
+            .mcp_client
+            .search_lazy_tool_candidates(Some(mcp_overrides), query)
+            .await?;
+        if let Some(endpoint_key_filter) = endpoint_key_filter {
+            matches.retain(|item| item.endpoint_key == endpoint_key_filter);
+        }
+        if matches.is_empty() {
+            return Ok("No matching lazy MCP tools found.".to_string());
+        }
+
+        let payload = matches
+            .iter()
+            .map(|item| {
+                json!({
+                    "endpoint": item.endpoint,
+                    "endpoint_key": item.endpoint_key,
+                    "tool_name": item.tool_name,
+                    "description": item.description,
+                })
+            })
+            .collect::<Vec<_>>();
+        Ok(serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string()))
+    }
+
+    async fn activate_lazy_mcp_tools(
+        &self,
+        arguments: &serde_json::Value,
+        mcp_overrides: &crate::domain::chat::models::McpOverrides,
+        mcp_tool_selection: &mut McpToolSelection,
+    ) -> Result<String> {
+        let endpoint_key = arguments
+            .get("endpoint_key")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .context("activate_lazy_mcp_tools requires endpoint_key")?;
+        let tool_names = arguments
+            .get("tool_names")
+            .and_then(|value| value.as_array())
+            .context("activate_lazy_mcp_tools requires tool_names array")?
+            .iter()
+            .filter_map(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>();
+        if tool_names.is_empty() {
+            anyhow::bail!("activate_lazy_mcp_tools requires at least one tool name");
+        }
+
+        let available = self
+            .mcp_client
+            .search_lazy_tool_candidates(Some(mcp_overrides), "")
+            .await?;
+        let matching = available
+            .into_iter()
+            .filter(|item| item.endpoint_key == endpoint_key)
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            anyhow::bail!("No lazy MCP endpoint found for endpoint_key={endpoint_key}");
+        }
+        let available_names = matching
+            .iter()
+            .map(|item| item.tool_name.clone())
+            .collect::<HashSet<_>>();
+        let invalid = tool_names
+            .iter()
+            .filter(|name| !available_names.contains(*name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !invalid.is_empty() {
+            anyhow::bail!(
+                "These tools are not available on lazy MCP endpoint {endpoint_key}: {}",
+                invalid.join(", ")
+            );
+        }
+
+        mcp_tool_selection.activate(endpoint_key, &tool_names);
+        let endpoint = matching
+            .first()
+            .map(|item| item.endpoint.clone())
+            .unwrap_or_default();
+        Ok(format!(
+            "Activated {} lazy MCP tool(s) from {} ({endpoint_key}): {}. They will be available in the next round.",
+            tool_names.len(),
+            endpoint,
+            tool_names.join(", ")
+        ))
     }
 
     async fn run_subagent(&self, prompt: &str, agent_type: &str) -> String {
@@ -1150,6 +1287,45 @@ fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Va
         }
     }));
     tools
+}
+
+fn lazy_mcp_control_tool_schemas() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "type": "function",
+            "function": {
+                "name": SEARCH_LAZY_MCP_TOOLS_TOOL,
+                "description": "Search hidden lazy MCP tools by keyword before exposing them to the model.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "What capability or tool you need." },
+                        "endpoint_key": { "type": "string", "description": "Optional lazy MCP endpoint key to narrow the search." }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }),
+        json!({
+            "type": "function",
+            "function": {
+                "name": ACTIVATE_LAZY_MCP_TOOLS_TOOL,
+                "description": "Expose a small subset of tools from one lazy MCP endpoint for the next reasoning round.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "endpoint_key": { "type": "string", "description": "The lazy MCP endpoint key returned by search_lazy_mcp_tools." },
+                        "tool_names": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "The specific tool names to expose."
+                        }
+                    },
+                    "required": ["endpoint_key", "tool_names"]
+                }
+            }
+        }),
+    ]
 }
 
 #[derive(Clone)]

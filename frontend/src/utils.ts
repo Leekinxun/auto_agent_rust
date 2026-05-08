@@ -5,6 +5,7 @@ import type {
   ChatModeId,
   ChatState,
   DisplayMessage,
+  McpExposureMode,
   McpServerPreview,
   OutputFile,
   ViewId
@@ -187,9 +188,20 @@ export function normalizeMcpPreviewServers(value: unknown): McpServerPreview[] {
         : typeof server.tool_count === "number"
           ? server.tool_count
           : tools.length;
+    const rawMode = typeof server.mode === "string" ? server.mode.toLowerCase() : "";
+    const mode: McpExposureMode =
+      rawMode === "lazy" || rawMode === "disabled" || rawMode === "eager"
+        ? rawMode
+        : "eager";
 
     return [{
       endpoint: server.endpoint,
+      endpointKey: typeof server.endpointKey === "string"
+        ? server.endpointKey
+        : typeof server.endpoint_key === "string"
+          ? server.endpoint_key
+          : server.endpoint,
+      mode,
       ok: typeof server.ok === "boolean" ? server.ok : false,
       toolCount: rawToolCount,
       tools,
@@ -326,6 +338,9 @@ export function buildFormData(
   }
   if (settings.mcpDisabledUrls.length) {
     formData.append("mcp_disabled_urls", JSON.stringify(settings.mcpDisabledUrls.map((item) => normalizeMcpEndpoint(item)).filter(Boolean)));
+  }
+  if (settings.mcpLazyUrls.length) {
+    formData.append("mcp_lazy_urls", JSON.stringify(settings.mcpLazyUrls.map((item) => normalizeMcpEndpoint(item)).filter(Boolean)));
   }
   appendOptionalFormData(formData, "system_append", settings.agentPromptAppend);
   appendOptionalFormData(formData, "model_id", settings.modelId);
