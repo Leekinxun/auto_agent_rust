@@ -1,0 +1,6 @@
+[2m2026-05-07T15:26:29.773744Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m starting rust backend [3mbind_addr[0m[2m=[0m"0.0.0.0:18000" [3mrepo_root[0m[2m=[0m/Users/lijinxuan/PycharmProjects/auto_claude_code_rust_react [3mmodel[0m[2m=[0mminimax-m2.5
+[2m2026-05-07T15:42:05.978079Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m shutdown signal received
+[2m2026-05-07T15:42:08.813111Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m starting rust backend [3mbind_addr[0m[2m=[0m"0.0.0.0:18000" [3mrepo_root[0m[2m=[0m/Users/lijinxuan/PycharmProjects/auto_claude_code_rust_react [3mmodel[0m[2m=[0mminimax-m2.5
+[2m2026-05-07T15:42:17.175831Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m shutdown signal received
+[2m2026-05-07T15:42:30.077521Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m starting rust backend [3mbind_addr[0m[2m=[0m"0.0.0.0:18000" [3mrepo_root[0m[2m=[0m/Users/lijinxuan/PycharmProjects/auto_claude_code_rust_react [3mmodel[0m[2m=[0mminimax-m2.5
+[2m2026-05-07T15:42:58.178252Z[0m [32m INFO[0m [2mauto_claude_code_rs[0m[2m:[0m shutdown signal received
