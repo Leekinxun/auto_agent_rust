@@ -16,6 +16,7 @@ use crate::domain::tasks::service::TaskService;
 use crate::infra::llm::client::LlmClient;
 
 const DEFAULT_MAX_SESSIONS: usize = 100;
+const STEERING_INBOX_NAME: &str = "lead-steering";
 
 #[derive(Clone)]
 pub struct SessionContext {
@@ -29,6 +30,8 @@ pub struct SessionContext {
     shutdown_requests: Arc<Mutex<HashMap<String, Value>>>,
     plan_requests: Arc<Mutex<HashMap<String, Value>>>,
     request_counter: Arc<AtomicU64>,
+    active_run_generation: Arc<Mutex<Option<u64>>>,
+    run_generation_counter: Arc<AtomicU64>,
     prompt_memory_snapshots: Arc<Mutex<HashMap<String, UserMemorySnapshot>>>,
 }
 
@@ -39,6 +42,7 @@ impl SessionContext {
             .with_context(|| format!("failed to create {}", session_dir.display()))?;
         let team_dir = session_dir.join("team");
         let bus = MessageBus::new(team_dir.clone())?;
+        bus.ensure_inbox(STEERING_INBOX_NAME)?;
         Ok(Self {
             session_id: session_id.to_string(),
             session_dir: session_dir.clone(),
@@ -49,6 +53,8 @@ impl SessionContext {
             shutdown_requests: Arc::new(Mutex::new(HashMap::new())),
             plan_requests: Arc::new(Mutex::new(HashMap::new())),
             request_counter: Arc::new(AtomicU64::new(1)),
+            active_run_generation: Arc::new(Mutex::new(None)),
+            run_generation_counter: Arc::new(AtomicU64::new(1)),
             prompt_memory_snapshots: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -112,6 +118,67 @@ impl SessionContext {
             }
         }
         Ok(items)
+    }
+
+    pub fn begin_agent_run(&self) -> u64 {
+        let generation = self.run_generation_counter.fetch_add(1, Ordering::SeqCst);
+        *self
+            .active_run_generation
+            .lock()
+            .expect("active run generation lock poisoned") = Some(generation);
+        generation
+    }
+
+    pub fn end_agent_run(&self, generation: u64) {
+        let mut active_generation = self
+            .active_run_generation
+            .lock()
+            .expect("active run generation lock poisoned");
+        if *active_generation == Some(generation) {
+            *active_generation = None;
+        }
+    }
+
+    pub fn active_run_generation(&self) -> Option<u64> {
+        *self
+            .active_run_generation
+            .lock()
+            .expect("active run generation lock poisoned")
+    }
+
+    pub fn push_steering_message(&self, content: &str, generation: u64) -> Result<String> {
+        self.bus.send(
+            "user",
+            STEERING_INBOX_NAME,
+            content,
+            "steering",
+            Some(Map::from_iter([(
+                "generation".to_string(),
+                json!(generation),
+            )])),
+        )
+    }
+
+    pub fn drain_steering_messages(&self, generation: u64) -> Result<Vec<Value>> {
+        let items = self.bus.read_inbox(STEERING_INBOX_NAME)?;
+        let mut matched = Vec::new();
+        let mut dropped = 0usize;
+        for item in items {
+            if item.get("generation").and_then(Value::as_u64) == Some(generation) {
+                matched.push(item);
+            } else {
+                dropped += 1;
+            }
+        }
+        if dropped > 0 {
+            tracing::info!(
+                session_id = self.session_id,
+                generation,
+                dropped,
+                "dropped stale steering messages for inactive run generation"
+            );
+        }
+        Ok(matched)
     }
 
     pub fn broadcast(&self, content: &str) -> Result<String> {
@@ -691,6 +758,63 @@ mod tests {
         assert_eq!(alice_inbox[0]["request_id"], json!("req-1"));
         assert_eq!(alice_inbox[0]["approve"], json!(true));
         assert_eq!(alice_inbox[0]["feedback"], json!("looks good"));
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn steering_messages_use_dedicated_inbox() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "auto-claude-sessions-steering-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let service = SessionService::new(repo_root.clone());
+        let ctx = service.get_or_create("demo").unwrap();
+        let generation = ctx.begin_agent_run();
+        ctx.push_steering_message("Stop after the first tool", generation)
+            .unwrap();
+
+        let steering = ctx.drain_steering_messages(generation).unwrap();
+        assert_eq!(steering.len(), 1);
+        assert_eq!(steering[0]["type"], json!("steering"));
+        assert_eq!(steering[0]["content"], json!("Stop after the first tool"));
+        assert!(ctx.read_inbox().unwrap().is_empty());
+        ctx.end_agent_run(generation);
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn stale_steering_messages_do_not_leak_into_next_run() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "auto-claude-sessions-steering-stale-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system time before unix epoch")
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&repo_root);
+        std::fs::create_dir_all(&repo_root).unwrap();
+
+        let service = SessionService::new(repo_root.clone());
+        let ctx = service.get_or_create("demo").unwrap();
+        let first_generation = ctx.begin_agent_run();
+        ctx.push_steering_message("Only for first run", first_generation)
+            .unwrap();
+        ctx.end_agent_run(first_generation);
+
+        let second_generation = ctx.begin_agent_run();
+        let steering = ctx.drain_steering_messages(second_generation).unwrap();
+        assert!(steering.is_empty());
+        ctx.end_agent_run(second_generation);
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }

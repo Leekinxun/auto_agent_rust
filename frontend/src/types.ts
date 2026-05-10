@@ -32,6 +32,11 @@ export type ProcessItem =
     output?: string;
   }
   | {
+    event: "steering";
+    message?: string;
+    skipped_tools?: string[];
+  }
+  | {
     event: "files_uploaded";
     files?: UploadedStreamFile[];
   }
@@ -73,6 +78,8 @@ export type ChatState = {
   input: string;
   sending: boolean;
   stopRequested: boolean;
+  steeringPending: boolean;
+  steeringPreview: string;
   queue: QueuedChatSubmission[];
 };
 

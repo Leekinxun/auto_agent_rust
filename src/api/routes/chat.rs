@@ -1,6 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::extract::{Multipart, Query, State};
+use axum::extract::{Multipart, Path, Query, State};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -9,12 +9,12 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
-use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse};
+use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse, SteeringResponse};
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
     AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
-    McpOverrides, UploadedFile,
+    McpOverrides, SteeringSubmission, UploadedFile,
 };
 
 pub fn router() -> Router<SharedState> {
@@ -24,6 +24,10 @@ pub fn router() -> Router<SharedState> {
         .route("/stream", post(agent_stream))
         .route("/memory/run", post(agent_memory_run))
         .route("/memory/stream", post(agent_memory_stream))
+        .route(
+            "/session/{session_id}/steering",
+            post(agent_session_steering),
+        )
         .route("/settings/prompts", get(agent_prompt_settings))
         .route("/settings/mcp", get(agent_mcp_settings))
 }
@@ -39,6 +43,11 @@ struct McpSettingsQuery {
     base_urls: Option<String>,
     disabled_urls: Option<String>,
     lazy_urls: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SteeringRequest {
+    content: String,
 }
 
 async fn agent_system_prompt(
@@ -136,6 +145,31 @@ async fn agent_memory_stream(
         state.session_service.touch(session_id);
     }
     build_stream_response(state, request, ChatMode::Memory).await
+}
+
+async fn agent_session_steering(
+    Path(session_id): Path<String>,
+    State(state): State<SharedState>,
+    Json(payload): Json<SteeringRequest>,
+) -> ApiResult<Json<SteeringResponse>> {
+    let content = payload.content.trim();
+    if content.is_empty() {
+        return Err(ApiError::bad_request("content 不能为空"));
+    }
+    let session = state.session_service.get_or_create(&session_id)?;
+    let Some(generation) = session.active_run_generation() else {
+        return Err(ApiError::bad_request(
+            "当前没有正在运行的 agent，无法注入 steering",
+        ));
+    };
+    session.push_steering_message(content, generation)?;
+    Ok(Json(
+        SteeringSubmission {
+            status: "queued".to_string(),
+            session_id,
+        }
+        .into(),
+    ))
 }
 
 async fn build_stream_response(
@@ -414,6 +448,13 @@ fn chat_event_to_sse(event: ChatEvent) -> Event {
         ChatEvent::ToolResult { tool, output } => sse_event(
             "tool_result",
             serde_json::json!({ "tool": tool, "output": output }),
+        ),
+        ChatEvent::Steering {
+            message,
+            skipped_tools,
+        } => sse_event(
+            "steering",
+            serde_json::json!({ "message": message, "skipped_tools": skipped_tools }),
         ),
         ChatEvent::FilesUploaded(files) => {
             sse_event("files_uploaded", serde_json::json!({ "files": files }))

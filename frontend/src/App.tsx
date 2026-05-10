@@ -76,6 +76,7 @@ type McpPreviewState = {
 type ChatTurnResult = {
   reply: string;
   aborted: boolean;
+  historyEntries?: HistoryEntry[];
 };
 
 type McpHealthCache = {
@@ -988,9 +989,17 @@ export default function App() {
       updateChat(mode, (current) => ({
         ...current,
         input: "",
-        files: [],
-        queue: [...current.queue, submission]
+        files: []
       }));
+      if (submission.files.length) {
+        updateChat(mode, (current) => ({
+          ...current,
+          queue: [...current.queue, submission]
+        }));
+        showToast("运行中附带文件的消息已排队，当前回答结束后自动继续", "info");
+        return;
+      }
+      void submitSteering(mode, submission);
       return;
     }
 
@@ -1001,6 +1010,46 @@ export default function App() {
     }));
 
     void runChatSubmission(mode, submission);
+  }
+
+  async function submitSteering(mode: ChatModeId, submission: QueuedChatSubmission) {
+    const config = CHAT_MODES[mode];
+    const steeringPreview = submission.message.trim();
+    updateChat(mode, (current) => ({
+      ...current,
+      steeringPending: true,
+      steeringPreview
+    }));
+    try {
+      await fetchJson(`/agent/session/${encodeURIComponent(config.sessionId)}/steering`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          content: submission.message
+        })
+      });
+      showToast("已发送 steering，当前工具步后立即处理", "info");
+    } catch (error) {
+      let shouldStartQueued = false;
+      updateChat(mode, (current) => {
+        shouldStartQueued = !current.sending;
+        return {
+          ...current,
+          steeringPending: false,
+          steeringPreview: "",
+          queue: [...current.queue, submission]
+        };
+      });
+      if (shouldStartQueued) {
+        const nextSubmission = takeNextQueuedSubmission(mode);
+        if (nextSubmission) {
+          void runChatSubmission(mode, nextSubmission);
+        }
+      }
+      showToast(`steering 发送失败，已回退为排队消息：${getErrorMessage(error)}`, "error");
+    }
   }
 
   async function runPreChatMcpHealthCheck() {
@@ -1121,7 +1170,16 @@ export default function App() {
         result = await sendSyncChat(config, history, submission.message, submission.files, assistantId);
       }
 
-      if (!result.aborted || result.reply.trim()) {
+      const historyEntries = result.historyEntries;
+      if (historyEntries?.length) {
+        updateChat(mode, (current) => ({
+          ...current,
+          history: [
+            ...current.history,
+            ...historyEntries
+          ]
+        }));
+      } else if (!result.aborted || result.reply.trim()) {
         updateChat(mode, (current) => ({
           ...current,
           history: [
@@ -1149,7 +1207,9 @@ export default function App() {
       updateChat(mode, (current) => ({
         ...current,
         sending: false,
-        stopRequested: false
+        stopRequested: false,
+        steeringPending: false,
+        steeringPreview: ""
       }));
       const nextSubmission = takeNextQueuedSubmission(mode);
       if (nextSubmission) {
@@ -1204,6 +1264,9 @@ export default function App() {
     let streamError: string | null = null;
     let finishReason = "stop";
     let aborted = false;
+    let activeAssistantId = assistantId;
+    const historyEntries: HistoryEntry[] = [{ role: "user", content: message }];
+    let currentAssistantReply = "";
 
     const flushPendingText = () => {
       if (!pendingText) {
@@ -1214,9 +1277,23 @@ export default function App() {
       const nextSlice = pendingText.slice(0, step);
       pendingText = pendingText.slice(step);
 
-      patchMessage(config.id, assistantId, (current) => ({
+      patchMessage(config.id, activeAssistantId, (current) => ({
         ...current,
         text: current.text + nextSlice
+      }));
+    };
+
+    const flushAllPendingText = () => {
+      if (!pendingText) {
+        return;
+      }
+
+      const remaining = pendingText;
+      pendingText = "";
+
+      patchMessage(config.id, activeAssistantId, (current) => ({
+        ...current,
+        text: current.text + remaining
       }));
     };
 
@@ -1245,18 +1322,62 @@ export default function App() {
       await readEventStream(response, (eventName, payload) => {
         if (eventName === "text" && typeof payload.text === "string") {
           fullReply += payload.text;
+          currentAssistantReply += payload.text;
           pendingText += payload.text;
           ensureRevealLoop();
           return;
         }
 
         if ((eventName === "tool_use" || eventName === "tool_result") && payload) {
-          appendProcessItem(config.id, assistantId, { event: eventName, ...payload });
+          appendProcessItem(config.id, activeAssistantId, { event: eventName, ...payload });
+          return;
+        }
+
+        if (eventName === "steering" && payload) {
+          const steeringMessage = typeof payload.message === "string" && payload.message.trim()
+            ? payload.message.trim()
+            : "收到新的 steering 消息";
+          flushAllPendingText();
+          if (currentAssistantReply.trim()) {
+            historyEntries.push({ role: "assistant", content: currentAssistantReply });
+          }
+          historyEntries.push({ role: "user", content: steeringMessage });
+          currentAssistantReply = "";
+          const nextAssistantId = createId("assistant");
+          updateChat(config.id, (current) => ({
+            ...current,
+            steeringPending: false,
+            steeringPreview: "",
+            messages: [
+              ...current.messages.map((message) => message.id === activeAssistantId
+                ? { ...message, processing: false }
+                : message),
+              {
+                id: createId("user"),
+                role: "user",
+                text: steeringMessage,
+                attachments: [],
+                processing: false,
+                outputFiles: [],
+                processItems: []
+              },
+              {
+                id: nextAssistantId,
+                role: "assistant",
+                text: "",
+                attachments: [],
+                processing: true,
+                outputFiles: [],
+                processItems: [{ event: "steering", ...payload }]
+              }
+            ]
+          }));
+          activeAssistantId = nextAssistantId;
           return;
         }
 
         if (eventName === "output_files" && Array.isArray(payload.files)) {
-          patchMessage(config.id, assistantId, (current) => ({
+          patchMessage(config.id, activeAssistantId, (current) => ({
             ...current,
             outputFiles: payload.files as OutputFile[]
           }));
@@ -1264,7 +1385,7 @@ export default function App() {
         }
 
         if (eventName === "files_uploaded" && Array.isArray(payload.files)) {
-          appendProcessItem(config.id, assistantId, {
+          appendProcessItem(config.id, activeAssistantId, {
             event: "files_uploaded",
             files: payload.files
           });
@@ -1272,7 +1393,7 @@ export default function App() {
         }
 
         if (eventName === "skills_updated" && payload) {
-          appendProcessItem(config.id, assistantId, { event: "skills_updated", ...payload });
+          appendProcessItem(config.id, activeAssistantId, { event: "skills_updated", ...payload });
           const count = typeof payload.count === "number" ? payload.count : 0;
           if (count > 0) {
             showToast(`已更新 ${count} 个私有 skill`, "success");
@@ -1283,14 +1404,14 @@ export default function App() {
         if (eventName === "done") {
           finishReason = typeof payload.finish_reason === "string" ? payload.finish_reason : "stop";
           if (finishReason !== "stop") {
-            appendProcessItem(config.id, assistantId, { event: "done", finish_reason: finishReason });
+            appendProcessItem(config.id, activeAssistantId, { event: "done", finish_reason: finishReason });
           }
           return;
         }
 
         if (eventName === "error") {
           streamError = typeof payload.detail === "string" ? payload.detail : "流式处理失败";
-          appendProcessItem(config.id, assistantId, { event: "error", detail: streamError });
+          appendProcessItem(config.id, activeAssistantId, { event: "error", detail: streamError });
         }
       });
     } catch (error) {
@@ -1312,20 +1433,26 @@ export default function App() {
     }
 
     if (aborted) {
-      appendProcessItem(config.id, assistantId, { event: "done", finish_reason: finishReason });
+      appendProcessItem(config.id, activeAssistantId, { event: "done", finish_reason: finishReason });
     }
 
-    patchMessage(config.id, assistantId, (current) => ({
+    patchMessage(config.id, activeAssistantId, (current) => ({
       ...current,
-      text: fullReply || (aborted ? "已停止当前回答。" : ""),
+      text: current.text || (aborted ? "已停止当前回答。" : ""),
       processing: false
     }));
+
+    if (currentAssistantReply.trim()) {
+      historyEntries.push({ role: "assistant", content: currentAssistantReply });
+    } else if (aborted && historyEntries.length === 1) {
+      historyEntries.push({ role: "assistant", content: "已停止当前回答。" });
+    }
 
     if (!aborted && finishReason !== "stop") {
       showToast(`流式响应结束：${describeFinishReason(finishReason)}`, "info");
     }
 
-    return { reply: fullReply, aborted };
+    return { reply: fullReply, aborted, historyEntries };
   }
 
   async function saveSkill() {
@@ -1947,6 +2074,7 @@ function ChatWorkspace(props: {
   const showUnreadAccent = hasScrollButtonUnreadAccent(hasUnreadUpdates, unreadTurnCount);
   const scrollButtonLabel = getScrollButtonLabel(hasUnreadUpdates, unreadTurnCount);
   const queuedPreview = chat.queue[0]?.message.trim() || "";
+  const steeringPreview = chat.steeringPreview.trim();
   const latestStreamingMessageId = [...chat.messages].reverse().find((message) => message.role === "assistant" && message.processing)?.id ?? null;
 
   useEffect(() => {
@@ -2024,15 +2152,25 @@ function ChatWorkspace(props: {
             </div>
           ) : null}
           <div className="composer">
-            {chat.sending || chat.queue.length ? (
+            {chat.sending || chat.queue.length || chat.steeringPending ? (
               <div className="composer-status-row">
                 {chat.sending ? (
                   <span className={`soft-chip ${chat.stopRequested ? "soft-chip-attention" : ""}`}>
-                    {chat.stopRequested ? "正在停止当前回答..." : "正在回答中，可继续提问"}
+                    {chat.stopRequested
+                      ? "正在停止当前回答..."
+                      : chat.steeringPending
+                        ? "正在回答中，已发送 steering，等待当前步切换"
+                        : "正在回答中，可发送 steering 纠偏"}
                   </span>
+                ) : null}
+                {chat.steeringPending ? (
+                  <span className="soft-chip soft-chip-attention">steering 已发送，当前步后立即抢占</span>
                 ) : null}
                 {chat.queue.length ? (
                   <span className="soft-chip">已排队 {chat.queue.length} 条，当前回答结束后自动继续</span>
+                ) : null}
+                {chat.steeringPending && steeringPreview ? (
+                  <span className="composer-queue-preview">steering：{steeringPreview}</span>
                 ) : null}
                 {queuedPreview ? <span className="composer-queue-preview">下一条：{queuedPreview}</span> : null}
               </div>
@@ -2087,7 +2225,9 @@ function ChatWorkspace(props: {
             />
             <div className="helper-text composer-hint">
               {chat.sending
-                ? "`Enter` 可继续加入队列，`Shift + Enter` 换行；输入法联想期间不会误发"
+                ? chat.steeringPending
+                  ? "`Enter` 可继续补充 steering，`Shift + Enter` 换行；输入法联想期间不会误发"
+                  : "`Enter` 发送 steering 纠偏；如附带文件则改为排队，`Shift + Enter` 换行"
                 : "`Enter` 发送，`Shift + Enter` 换行；输入法联想期间不会误发"}
             </div>
 
@@ -2243,6 +2383,29 @@ function renderProcessItem(item: ProcessItem, index: number) {
           <strong>工具结果 · {title}</strong>
         </div>
         {outputText ? <pre>{outputText}</pre> : <div className="process-note">无输出</div>}
+      </div>
+    );
+  }
+
+  if (isRecord(item) && item.event === "steering") {
+    const message = typeof item.message === "string" && item.message.trim()
+      ? item.message.trim()
+      : "收到新的 steering 消息";
+    const skippedTools = Array.isArray(item.skipped_tools)
+      ? item.skipped_tools.filter((tool): tool is string => typeof tool === "string" && tool.trim().length > 0)
+      : [];
+    return (
+      <div className="process-item steering" key={`process-${index}`}>
+        <div className="process-item-header">
+          <span className="process-badge">STEER</span>
+          <strong>收到实时纠偏</strong>
+        </div>
+        <div className="process-note">{message}</div>
+        {skippedTools.length ? (
+          <div className="process-note">已跳过剩余工具：{skippedTools.join(", ")}</div>
+        ) : (
+          <div className="process-note">本轮未跳过额外工具</div>
+        )}
       </div>
     );
   }

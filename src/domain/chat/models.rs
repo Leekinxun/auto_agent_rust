@@ -77,9 +77,9 @@ impl McpOverrides {
     }
 
     pub fn has_lazy_endpoints(&self) -> bool {
-        self.lazy_urls.iter().any(|item| {
-            self.exposure_mode_for_endpoint(item) == McpExposureMode::Lazy
-        })
+        self.lazy_urls
+            .iter()
+            .any(|item| self.exposure_mode_for_endpoint(item) == McpExposureMode::Lazy)
     }
 }
 
@@ -140,6 +140,12 @@ pub struct OutputFile {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct SteeringSubmission {
+    pub status: String,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatResult {
     pub reply: String,
     pub history: Vec<HistoryEntry>,
@@ -156,13 +162,27 @@ pub struct SkillUsage {
 #[derive(Debug, Clone)]
 pub enum ChatEvent {
     Text(String),
-    ToolUse { name: String, arguments: String },
-    ToolResult { tool: String, output: String },
+    ToolUse {
+        name: String,
+        arguments: String,
+    },
+    ToolResult {
+        tool: String,
+        output: String,
+    },
+    Steering {
+        message: String,
+        skipped_tools: Vec<String>,
+    },
     FilesUploaded(Vec<UploadedFile>),
     OutputFiles(Vec<OutputFile>),
     SkillsUpdated(Vec<SkillDocument>),
-    Done { finish_reason: String },
-    Error { detail: String },
+    Done {
+        finish_reason: String,
+    },
+    Error {
+        detail: String,
+    },
 }
 
 impl From<McpServerPreview> for McpServerPreviewDto {

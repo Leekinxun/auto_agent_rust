@@ -81,8 +81,28 @@ export const SKILL_CREATE_PATH = "/skills/new";
 
 export function createInitialChats(): Record<ChatModeId, ChatState> {
   return {
-    stream: { history: [], messages: [], files: [], input: "", sending: false, stopRequested: false, queue: [] },
-    memoryStream: { history: [], messages: [], files: [], input: "", sending: false, stopRequested: false, queue: [] }
+    stream: {
+      history: [],
+      messages: [],
+      files: [],
+      input: "",
+      sending: false,
+      stopRequested: false,
+      steeringPending: false,
+      steeringPreview: "",
+      queue: []
+    },
+    memoryStream: {
+      history: [],
+      messages: [],
+      files: [],
+      input: "",
+      sending: false,
+      stopRequested: false,
+      steeringPending: false,
+      steeringPreview: "",
+      queue: []
+    }
   };
 }
 

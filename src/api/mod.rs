@@ -86,6 +86,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
+    use tokio::time::{Duration, sleep};
 
     struct TestRepo {
         root: PathBuf,
@@ -517,6 +518,69 @@ mod tests {
             );
         }
 
+        if messages.iter().any(|message| {
+            message.get("role") == Some(&json!("user"))
+                && message
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .contains("<steering>")
+        }) {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            return (
+                StatusCode::OK,
+                headers,
+                json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "steering applied",
+                                "tool_calls": []
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                })
+                .to_string(),
+            );
+        }
+
+        if last_user.as_deref() == Some("slow steering run")
+            && !messages.iter().any(|message| {
+                message.get("role") == Some(&json!("user"))
+                    && message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .contains("<steering>")
+            })
+        {
+            sleep(Duration::from_millis(150)).await;
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json"),
+            );
+            return (
+                StatusCode::OK,
+                headers,
+                json!({
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "tool_calls": []
+                            },
+                            "finish_reason": "stop"
+                        }
+                    ]
+                })
+                .to_string(),
+            );
+        }
+
         headers.insert(
             header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -878,6 +942,134 @@ mod tests {
                 .iter()
                 .any(|item| item["type"] == json!("shutdown_request"))
         );
+
+        harness.state.session_service.delete(session_id);
+    }
+
+    #[tokio::test]
+    async fn smoke_tests_accept_session_steering_messages() {
+        let harness = setup_harness().await;
+        let session_id = "steering-demo";
+        let ctx = harness
+            .state
+            .session_service
+            .get_or_create(session_id)
+            .unwrap();
+        let generation = ctx.begin_agent_run();
+
+        let steering = harness
+            .client
+            .post(format!(
+                "{}/agent/session/{}/steering",
+                harness.base_url, session_id
+            ))
+            .header("Content-Type", "application/json")
+            .body(json!({ "content": "Please stop after the next tool" }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(steering["status"], json!("queued"));
+        assert_eq!(steering["session_id"], json!(session_id));
+
+        let steering_items = ctx.drain_steering_messages(generation).unwrap();
+        assert_eq!(steering_items.len(), 1);
+        assert_eq!(steering_items[0]["type"], json!("steering"));
+        assert_eq!(
+            steering_items[0]["content"],
+            json!("Please stop after the next tool")
+        );
+        ctx.end_agent_run(generation);
+
+        harness.state.session_service.delete(session_id);
+    }
+
+    #[tokio::test]
+    async fn smoke_tests_apply_steering_to_active_run_without_leaking_to_next_run() {
+        let harness = setup_harness().await;
+        let session_id = "steering-e2e";
+        let ctx = harness
+            .state
+            .session_service
+            .get_or_create(session_id)
+            .unwrap();
+
+        let client = harness.client.clone();
+        let base_url = harness.base_url.clone();
+        let run_handle = tokio::spawn(async move {
+            client
+                .post(format!("{}/agent/run", base_url))
+                .multipart(
+                    Form::new()
+                        .text("message", "slow steering run")
+                        .text("history", "[]")
+                        .text("session_id", session_id),
+                )
+                .send()
+                .await
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json::<Value>()
+                .await
+                .unwrap()
+        });
+
+        for _ in 0..20 {
+            if ctx.active_run_generation().is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            ctx.active_run_generation().is_some(),
+            "expected active run before sending steering"
+        );
+
+        let steering = harness
+            .client
+            .post(format!(
+                "{}/agent/session/{}/steering",
+                harness.base_url, session_id
+            ))
+            .header("Content-Type", "application/json")
+            .body(json!({ "content": "Please revise" }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(steering["status"], json!("queued"));
+        assert_eq!(steering["session_id"], json!(session_id));
+
+        let run = run_handle.await.unwrap();
+        assert_eq!(run["reply"], json!("steering applied"));
+
+        let next = harness
+            .client
+            .post(format!("{}/agent/run", harness.base_url))
+            .multipart(
+                Form::new()
+                    .text("message", "hello")
+                    .text("history", "[]")
+                    .text("session_id", session_id),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(next["reply"], json!("stub reply"));
 
         harness.state.session_service.delete(session_id);
     }

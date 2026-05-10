@@ -20,6 +20,8 @@ describe("frontend chat surface", () => {
     expect(Object.keys(createInitialChats())).toEqual(["stream", "memoryStream"]);
     expect(createInitialChats().stream.queue).toEqual([]);
     expect(createInitialChats().stream.stopRequested).toBe(false);
+    expect(createInitialChats().stream.steeringPending).toBe(false);
+    expect(createInitialChats().stream.steeringPreview).toBe("");
   });
 
   it("keeps active view paths for the two streaming pages", () => {

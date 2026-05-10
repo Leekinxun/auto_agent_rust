@@ -38,6 +38,7 @@ const PAST_CONTEXT_TAG: &str = "past_context";
 const PAST_CONTEXT_ACK: &str = "Noted. I'll reference this context only if relevant.";
 const SEARCH_LAZY_MCP_TOOLS_TOOL: &str = "search_lazy_mcp_tools";
 const ACTIVATE_LAZY_MCP_TOOLS_TOOL: &str = "activate_lazy_mcp_tools";
+const STEERING_ACK: &str = "Noted steering update. Re-evaluating before running more tools.";
 
 #[derive(Clone)]
 pub struct ChatOrchestrator {
@@ -87,76 +88,129 @@ impl ChatOrchestrator {
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
+        let active_run_generation = prepared
+            .session
+            .as_deref()
+            .map(SessionContext::begin_agent_run);
 
-        for _ in 0..max_iterations {
-            microcompact(&mut messages);
-            if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
-                messages =
-                    auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
-            }
-            self.inject_session_messages(&mut messages, prepared.session.as_deref())
-                .await?;
-            let tools = self
-                .load_public_tools_with_overrides(
-                    prepared.session.is_some(),
-                    Some(&prepared.mcp_overrides),
-                    &mcp_tool_selection,
+        let run_result: Result<()> = async {
+            for _ in 0..max_iterations {
+                microcompact(&mut messages);
+                if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
+                    messages = auto_compact(
+                        &self.repo_root,
+                        &self.config,
+                        &self.llm_client,
+                        messages.clone(),
+                    )
+                    .await?;
+                }
+                self.inject_session_messages(
+                    &mut messages,
+                    prepared.session.as_deref(),
+                    active_run_generation,
                 )
-                .await;
-            let response = self
-                .llm_client
-                .chat(&self.build_llm_request_options(
-                    messages.clone(),
-                    Some(tools),
-                    false,
-                    &prepared.llm_overrides,
-                )?)
                 .await?;
-            let Some(choice) = response.choices.into_iter().next() else {
-                finish_reason = "empty".to_string();
-                break;
-            };
-            finish_reason = choice.finish_reason.unwrap_or_else(|| "stop".to_string());
-            let assistant = choice.message;
-            let tool_calls = assistant.tool_calls.clone();
-            let assistant_content = assistant.content.clone().unwrap_or_default();
-            messages.push(assistant.into_chat_message());
-            if tool_calls.is_empty() {
-                reply = assistant_content;
-                break;
-            }
-
-            let mut compress_requested = false;
-            for tool_call in &tool_calls {
-                let result = self
-                    .dispatch_public_tool(
-                        tool_call,
-                        prepared.session.as_deref(),
-                        prepared.user_id.as_deref(),
-                        matches!(mode, ChatMode::Memory),
-                        &prepared.mcp_overrides,
-                        &mut mcp_tool_selection,
-                        &mut skill_usages,
+                let tools = self
+                    .load_public_tools_with_overrides(
+                        prepared.session.is_some(),
+                        Some(&prepared.mcp_overrides),
+                        &mcp_tool_selection,
                     )
                     .await;
-                if tool_call.function.name == "compress" {
-                    compress_requested = true;
+                let response = self
+                    .llm_client
+                    .chat(&self.build_llm_request_options(
+                        messages.clone(),
+                        Some(tools),
+                        false,
+                        &prepared.llm_overrides,
+                    )?)
+                    .await?;
+                let Some(choice) = response.choices.into_iter().next() else {
+                    finish_reason = "empty".to_string();
+                    break;
+                };
+                finish_reason = choice.finish_reason.unwrap_or_else(|| "stop".to_string());
+                let assistant = choice.message;
+                let tool_calls = assistant.tool_calls.clone();
+                let assistant_content = assistant.content.clone().unwrap_or_default();
+                messages.push(assistant.into_chat_message());
+                if tool_calls.is_empty() {
+                    append_reply_segment(&mut reply, &assistant_content);
+                    if self.apply_steering_interrupt(
+                        &mut messages,
+                        prepared.session.as_deref(),
+                        active_run_generation,
+                        None,
+                        None,
+                    )? {
+                        continue;
+                    }
+                    break;
                 }
-                messages.push(ChatMessage::tool(tool_call.id.clone(), result));
-            }
 
-            self.apply_todo_reminder(
-                &mut messages,
-                prepared.session.as_deref(),
-                &tool_calls,
-                &mut rounds_without_todo,
-            );
+                let mut compress_requested = false;
+                let mut steering_interrupted = false;
+                for (index, tool_call) in tool_calls.iter().enumerate() {
+                    let result = self
+                        .dispatch_public_tool(
+                            tool_call,
+                            prepared.session.as_deref(),
+                            prepared.user_id.as_deref(),
+                            matches!(mode, ChatMode::Memory),
+                            &prepared.mcp_overrides,
+                            &mut mcp_tool_selection,
+                            &mut skill_usages,
+                        )
+                        .await;
+                    if tool_call.function.name == "compress" {
+                        compress_requested = true;
+                    }
+                    messages.push(ChatMessage::tool(tool_call.id.clone(), result));
 
-            if compress_requested {
-                messages =
-                    auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
+                    if self.apply_steering_interrupt(
+                        &mut messages,
+                        prepared.session.as_deref(),
+                        active_run_generation,
+                        Some(&tool_calls[index + 1..]),
+                        None,
+                    )? {
+                        steering_interrupted = true;
+                        break;
+                    }
+                }
+
+                if compress_requested {
+                    messages = auto_compact(
+                        &self.repo_root,
+                        &self.config,
+                        &self.llm_client,
+                        messages.clone(),
+                    )
+                    .await?;
+                }
+
+                if steering_interrupted {
+                    continue;
+                }
+
+                self.apply_todo_reminder(
+                    &mut messages,
+                    prepared.session.as_deref(),
+                    &tool_calls,
+                    &mut rounds_without_todo,
+                );
             }
+            Ok(())
         }
+        .await;
+
+        if let (Some(session), Some(generation)) = (prepared.session.as_deref(), active_run_generation) {
+            session.end_agent_run(generation);
+        }
+
+        run_result?;
 
         if reply.trim().is_empty() {
             if let Some(recovered_reply) = self
@@ -213,257 +267,310 @@ impl ChatOrchestrator {
         let mut mcp_tool_selection = McpToolSelection::default();
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
+        let active_run_generation = prepared
+            .session
+            .as_deref()
+            .map(SessionContext::begin_agent_run);
 
-        for _ in 0..max_iterations {
-            if sender.is_closed() {
-                tracing::info!("stream receiver closed before next iteration");
-                return Ok(());
-            }
-            microcompact(&mut messages);
-            if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
-                messages =
-                    auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
-            }
-            self.inject_session_messages(&mut messages, prepared.session.as_deref())
-                .await?;
-            let tools = self
-                .load_public_tools_with_overrides(
-                    prepared.session.is_some(),
-                    Some(&prepared.mcp_overrides),
-                    &mcp_tool_selection,
-                )
-                .await;
-            let request_body = self.build_llm_request_options(
-                messages.clone(),
-                Some(tools),
-                true,
-                &prepared.llm_overrides,
-            )?;
-            let mut stream = self.llm_client.stream_chat(&request_body).await?;
-            let mut buffer = String::new();
-            let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
-            let mut round_text = String::new();
-            let mut finish_reason = "stop".to_string();
-
-            loop {
-                let chunk = tokio::select! {
-                    _ = sender.closed() => {
-                        tracing::info!("stream receiver closed during llm stream");
-                        return Ok(());
-                    }
-                    chunk = stream.next() => chunk,
-                };
-                let Some(chunk) = chunk else {
-                    break;
-                };
-                let bytes = chunk.context("failed to read llm stream chunk")?;
-                buffer.push_str(
-                    std::str::from_utf8(&bytes).context("llm stream returned invalid utf-8")?,
-                );
-
-                while let Some(index) = buffer.find("\n\n") {
-                    let frame = buffer[..index].to_string();
-                    buffer = buffer[index + 2..].to_string();
-                    for payload in parse_sse_frame(&frame)? {
-                        if payload == "[DONE]" {
-                            continue;
-                        }
-                        let chunk: StreamChunk =
-                            serde_json::from_str(&payload).context("invalid llm stream json")?;
-                        for choice in chunk.choices {
-                            if let Some(content) = choice.delta.content {
-                                if !content.is_empty() {
-                                    round_text.push_str(&content);
-                                    full_reply.push_str(&content);
-                                    if !try_send_stream_event(&sender, ChatEvent::Text(content))
-                                        .await
-                                    {
-                                        return Ok(());
-                                    }
-                                }
-                            }
-                            for delta in choice.delta.tool_calls {
-                                while tool_accumulators.len() <= delta.index {
-                                    tool_accumulators.push(ToolCallAccumulator::default());
-                                }
-                                tool_accumulators[delta.index].apply_delta(delta);
-                            }
-                            if let Some(reason) = choice.finish_reason {
-                                finish_reason = reason;
-                            }
-                        }
-                    }
-                }
-            }
-
-            let tool_calls = tool_accumulators
-                .into_iter()
-                .filter(|item| !item.name.is_empty())
-                .map(ToolCallAccumulator::into_tool_call)
-                .collect::<Vec<_>>();
-
-            messages.push(ChatMessage::assistant(
-                if round_text.is_empty() {
-                    None
-                } else {
-                    Some(round_text)
-                },
-                tool_calls.clone(),
-            ));
-
-            if tool_calls.is_empty() {
-                if full_reply.trim().is_empty() {
-                    if let Some(recovered_reply) = self
-                        .recover_missing_final_reply(
-                            &messages,
-                            &prepared.llm_overrides,
-                            &finish_reason,
-                        )
-                        .await?
-                    {
-                        full_reply = recovered_reply.clone();
-                        finish_reason = "stop".to_string();
-                        if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
-                            return Ok(());
-                        }
-                    } else {
-                        let detail = build_empty_stream_reply_error(&finish_reason, max_iterations);
-                        tracing::warn!(finish_reason, "stream ended without visible reply");
-                        let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
-                        return Ok(());
-                    }
-                }
-
-                let output_files = extract_output_files(&self.repo_root, &full_reply);
-                if !output_files.is_empty() {
-                    if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files)).await {
-                        return Ok(());
-                    }
-                }
-                self.spawn_stream_memory_side_effects(
-                    &mode,
-                    prepared.session.clone(),
-                    prepared.user_id.clone(),
-                    prepared.user_message.clone(),
-                    full_reply.clone(),
-                    skill_usages.clone(),
-                    prepared.prompt_overrides.clone(),
-                );
-                log_final_reply(
-                    &mode,
-                    prepared.session.as_deref(),
-                    prepared.user_id.as_deref(),
-                    &finish_reason,
-                    &full_reply,
-                );
-                let _ = try_send_stream_event(&sender, ChatEvent::Done { finish_reason }).await;
-                return Ok(());
-            }
-
-            let mut compress_requested = false;
-            for tool_call in &tool_calls {
-                if !try_send_stream_event(
-                    &sender,
-                    ChatEvent::ToolUse {
-                        name: tool_call.function.name.clone(),
-                        arguments: tool_call.function.arguments.clone(),
-                    },
-                )
-                .await
-                {
+        let stream_result: Result<()> = async {
+            for _ in 0..max_iterations {
+                if sender.is_closed() {
+                    tracing::info!("stream receiver closed before next iteration");
                     return Ok(());
                 }
-                let result = self
-                    .dispatch_public_tool(
-                        &tool_call,
-                        prepared.session.as_deref(),
-                        prepared.user_id.as_deref(),
-                        matches!(mode, ChatMode::Memory),
-                        &prepared.mcp_overrides,
-                        &mut mcp_tool_selection,
-                        &mut skill_usages,
+                microcompact(&mut messages);
+                if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
+                    messages = auto_compact(
+                        &self.repo_root,
+                        &self.config,
+                        &self.llm_client,
+                        messages.clone(),
+                    )
+                    .await?;
+                }
+                self.inject_session_messages(
+                    &mut messages,
+                    prepared.session.as_deref(),
+                    active_run_generation,
+                )
+                .await?;
+                let tools = self
+                    .load_public_tools_with_overrides(
+                        prepared.session.is_some(),
+                        Some(&prepared.mcp_overrides),
+                        &mcp_tool_selection,
                     )
                     .await;
-                if tool_call.function.name == "compress" {
-                    compress_requested = true;
+                let request_body = self.build_llm_request_options(
+                    messages.clone(),
+                    Some(tools),
+                    true,
+                    &prepared.llm_overrides,
+                )?;
+                let mut stream = self.llm_client.stream_chat(&request_body).await?;
+                let mut buffer = String::new();
+                let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
+                let mut round_text = String::new();
+                let mut finish_reason = "stop".to_string();
+
+                loop {
+                    let chunk = tokio::select! {
+                        _ = sender.closed() => {
+                            tracing::info!("stream receiver closed during llm stream");
+                            return Ok(());
+                        }
+                        chunk = stream.next() => chunk,
+                    };
+                    let Some(chunk) = chunk else {
+                        break;
+                    };
+                    let bytes = chunk.context("failed to read llm stream chunk")?;
+                    buffer.push_str(
+                        std::str::from_utf8(&bytes).context("llm stream returned invalid utf-8")?,
+                    );
+
+                    while let Some(index) = buffer.find("\n\n") {
+                        let frame = buffer[..index].to_string();
+                        buffer = buffer[index + 2..].to_string();
+                        for payload in parse_sse_frame(&frame)? {
+                            if payload == "[DONE]" {
+                                continue;
+                            }
+                            let chunk: StreamChunk =
+                                serde_json::from_str(&payload).context("invalid llm stream json")?;
+                            for choice in chunk.choices {
+                                if let Some(content) = choice.delta.content {
+                                    if !content.is_empty() {
+                                        round_text.push_str(&content);
+                                        full_reply.push_str(&content);
+                                        if !try_send_stream_event(&sender, ChatEvent::Text(content))
+                                            .await
+                                        {
+                                            return Ok(());
+                                        }
+                                    }
+                                }
+                                for delta in choice.delta.tool_calls {
+                                    while tool_accumulators.len() <= delta.index {
+                                        tool_accumulators.push(ToolCallAccumulator::default());
+                                    }
+                                    tool_accumulators[delta.index].apply_delta(delta);
+                                }
+                                if let Some(reason) = choice.finish_reason {
+                                    finish_reason = reason;
+                                }
+                            }
+                        }
+                    }
                 }
-                let preview = truncate_for_preview(&result, 2_000);
-                if !try_send_stream_event(
-                    &sender,
-                    ChatEvent::ToolResult {
-                        tool: tool_call.function.name.clone(),
-                        output: preview,
+
+                let tool_calls = tool_accumulators
+                    .into_iter()
+                    .filter(|item| !item.name.is_empty())
+                    .map(ToolCallAccumulator::into_tool_call)
+                    .collect::<Vec<_>>();
+
+                messages.push(ChatMessage::assistant(
+                    if round_text.is_empty() {
+                        None
+                    } else {
+                        Some(round_text)
                     },
-                )
-                .await
-                {
+                    tool_calls.clone(),
+                ));
+
+                if tool_calls.is_empty() {
+                    if full_reply.trim().is_empty() {
+                        if let Some(recovered_reply) = self
+                            .recover_missing_final_reply(
+                                &messages,
+                                &prepared.llm_overrides,
+                                &finish_reason,
+                            )
+                            .await?
+                        {
+                            full_reply = recovered_reply.clone();
+                            finish_reason = "stop".to_string();
+                            if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
+                                return Ok(());
+                            }
+                        } else {
+                            let detail = build_empty_stream_reply_error(&finish_reason, max_iterations);
+                            tracing::warn!(finish_reason, "stream ended without visible reply");
+                            let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
+                            return Ok(());
+                        }
+                    }
+
+                    if self.apply_steering_interrupt(
+                        &mut messages,
+                        prepared.session.as_deref(),
+                        active_run_generation,
+                        None,
+                        Some(&sender),
+                    )? {
+                        continue;
+                    }
+
+                    let output_files = extract_output_files(&self.repo_root, &full_reply);
+                    if !output_files.is_empty() {
+                        if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files)).await {
+                            return Ok(());
+                        }
+                    }
+                    self.spawn_stream_memory_side_effects(
+                        &mode,
+                        prepared.session.clone(),
+                        prepared.user_id.clone(),
+                        prepared.user_message.clone(),
+                        full_reply.clone(),
+                        skill_usages.clone(),
+                        prepared.prompt_overrides.clone(),
+                    );
+                    log_final_reply(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        &finish_reason,
+                        &full_reply,
+                    );
+                    let _ = try_send_stream_event(&sender, ChatEvent::Done { finish_reason }).await;
                     return Ok(());
                 }
-                messages.push(ChatMessage::tool(tool_call.id.clone(), result));
-            }
 
-            self.apply_todo_reminder(
-                &mut messages,
-                prepared.session.as_deref(),
-                &tool_calls,
-                &mut rounds_without_todo,
-            );
+                let mut compress_requested = false;
+                let mut steering_interrupted = false;
+                for (index, tool_call) in tool_calls.iter().enumerate() {
+                    if !try_send_stream_event(
+                        &sender,
+                        ChatEvent::ToolUse {
+                            name: tool_call.function.name.clone(),
+                            arguments: tool_call.function.arguments.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
+                    let result = self
+                        .dispatch_public_tool(
+                            &tool_call,
+                            prepared.session.as_deref(),
+                            prepared.user_id.as_deref(),
+                            matches!(mode, ChatMode::Memory),
+                            &prepared.mcp_overrides,
+                            &mut mcp_tool_selection,
+                            &mut skill_usages,
+                        )
+                        .await;
+                    if tool_call.function.name == "compress" {
+                        compress_requested = true;
+                    }
+                    let preview = truncate_for_preview(&result, 2_000);
+                    if !try_send_stream_event(
+                        &sender,
+                        ChatEvent::ToolResult {
+                            tool: tool_call.function.name.clone(),
+                            output: preview,
+                        },
+                    )
+                    .await
+                    {
+                        return Ok(());
+                    }
+                    messages.push(ChatMessage::tool(tool_call.id.clone(), result));
 
-            if compress_requested {
-                messages =
-                    auto_compact(&self.repo_root, &self.config, &self.llm_client, messages).await?;
-            }
-        }
-
-        let mut final_finish_reason = "max_iterations".to_string();
-        if full_reply.trim().is_empty() {
-            if let Some(recovered_reply) = self
-                .recover_missing_final_reply(&messages, &prepared.llm_overrides, "max_iterations")
-                .await?
-            {
-                full_reply = recovered_reply.clone();
-                final_finish_reason = "stop".to_string();
-                if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
-                    return Ok(());
+                    if self.apply_steering_interrupt(
+                        &mut messages,
+                        prepared.session.as_deref(),
+                        active_run_generation,
+                        Some(&tool_calls[index + 1..]),
+                        Some(&sender),
+                    )? {
+                        steering_interrupted = true;
+                        break;
+                    }
                 }
-            } else {
-                let detail = build_empty_stream_reply_error("max_iterations", max_iterations);
-                tracing::warn!(
-                    max_iterations,
-                    "stream exhausted iteration budget without visible reply"
+
+                if compress_requested {
+                    messages = auto_compact(
+                        &self.repo_root,
+                        &self.config,
+                        &self.llm_client,
+                        messages.clone(),
+                    )
+                    .await?;
+                }
+
+                if steering_interrupted {
+                    continue;
+                }
+
+                self.apply_todo_reminder(
+                    &mut messages,
+                    prepared.session.as_deref(),
+                    &tool_calls,
+                    &mut rounds_without_todo,
                 );
-                let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
+            }
+
+            let mut final_finish_reason = "max_iterations".to_string();
+            if full_reply.trim().is_empty() {
+                if let Some(recovered_reply) = self
+                    .recover_missing_final_reply(&messages, &prepared.llm_overrides, "max_iterations")
+                    .await?
+                {
+                    full_reply = recovered_reply.clone();
+                    final_finish_reason = "stop".to_string();
+                    if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
+                        return Ok(());
+                    }
+                } else {
+                    let detail = build_empty_stream_reply_error("max_iterations", max_iterations);
+                    tracing::warn!(
+                        max_iterations,
+                        "stream exhausted iteration budget without visible reply"
+                    );
+                    let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
+                    return Ok(());
+                }
+            }
+
+            if !try_send_stream_event(
+                &sender,
+                ChatEvent::Done {
+                    finish_reason: final_finish_reason.clone(),
+                },
+            )
+            .await
+            {
                 return Ok(());
             }
+            self.spawn_stream_memory_side_effects(
+                &mode,
+                prepared.session.clone(),
+                prepared.user_id.clone(),
+                prepared.user_message.clone(),
+                full_reply.clone(),
+                skill_usages.clone(),
+                prepared.prompt_overrides.clone(),
+            );
+            log_final_reply(
+                &mode,
+                prepared.session.as_deref(),
+                prepared.user_id.as_deref(),
+                &final_finish_reason,
+                &full_reply,
+            );
+            Ok(())
+        }
+        .await;
+
+        if let (Some(session), Some(generation)) = (prepared.session.as_deref(), active_run_generation) {
+            session.end_agent_run(generation);
         }
 
-        if !try_send_stream_event(
-            &sender,
-            ChatEvent::Done {
-                finish_reason: final_finish_reason.clone(),
-            },
-        )
-        .await
-        {
-            return Ok(());
-        }
-        self.spawn_stream_memory_side_effects(
-            &mode,
-            prepared.session.clone(),
-            prepared.user_id.clone(),
-            prepared.user_message.clone(),
-            full_reply.clone(),
-            skill_usages.clone(),
-            prepared.prompt_overrides.clone(),
-        );
-        log_final_reply(
-            &mode,
-            prepared.session.as_deref(),
-            prepared.user_id.as_deref(),
-            &final_finish_reason,
-            &full_reply,
-        );
-        Ok(())
+        stream_result
     }
 
     fn prepare_request(&self, request: ChatRequest, mode: &ChatMode) -> Result<PreparedRequest> {
@@ -739,7 +846,9 @@ impl ChatOrchestrator {
                     skill.body
                 ))
             })(),
-            SEARCH_LAZY_MCP_TOOLS_TOOL => self.search_lazy_mcp_tools(&arguments, mcp_overrides).await,
+            SEARCH_LAZY_MCP_TOOLS_TOOL => {
+                self.search_lazy_mcp_tools(&arguments, mcp_overrides).await
+            }
             ACTIVATE_LAZY_MCP_TOOLS_TOOL => {
                 self.activate_lazy_mcp_tools(&arguments, mcp_overrides, mcp_tool_selection)
                     .await
@@ -1144,6 +1253,7 @@ impl ChatOrchestrator {
         &self,
         messages: &mut Vec<ChatMessage>,
         session: Option<&SessionContext>,
+        active_run_generation: Option<u64>,
     ) -> Result<()> {
         let Some(session) = session else {
             return Ok(());
@@ -1167,17 +1277,89 @@ impl ChatOrchestrator {
 
         let inbox = session.read_inbox()?;
         if !inbox.is_empty() {
-            messages.push(ChatMessage::user(format!(
-                "<inbox>{}</inbox>",
-                serde_json::to_string_pretty(&inbox).context("failed to encode inbox messages")?
-            )));
+            messages.push(ChatMessage::user(render_inbox_block("inbox", &inbox)?));
             messages.push(ChatMessage::assistant(
                 Some("Noted inbox messages.".to_string()),
                 Vec::new(),
             ));
         }
 
+        let steering = if let Some(generation) = active_run_generation {
+            session.drain_steering_messages(generation)?
+        } else {
+            Vec::new()
+        };
+        if !steering.is_empty() {
+            messages.push(ChatMessage::user(render_inbox_block(
+                "steering", &steering,
+            )?));
+            messages.push(ChatMessage::assistant(
+                Some(STEERING_ACK.to_string()),
+                Vec::new(),
+            ));
+        }
+
         Ok(())
+    }
+
+    fn apply_steering_interrupt(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        session: Option<&SessionContext>,
+        active_run_generation: Option<u64>,
+        remaining_tool_calls: Option<&[ToolCall]>,
+        sender: Option<&mpsc::Sender<ChatEvent>>,
+    ) -> Result<bool> {
+        let Some(session) = session else {
+            return Ok(false);
+        };
+        let Some(generation) = active_run_generation else {
+            return Ok(false);
+        };
+        let steering = session.drain_steering_messages(generation)?;
+        if steering.is_empty() {
+            return Ok(false);
+        }
+        let rendered = render_inbox_block("steering", &steering)?;
+        let preview = steering
+            .last()
+            .and_then(|item| item.get("content"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("收到新的 steering 消息")
+            .to_string();
+        let skipped_tools = remaining_tool_calls
+            .unwrap_or(&[])
+            .iter()
+            .map(|tool_call| tool_call.function.name.clone())
+            .collect::<Vec<_>>();
+
+        tracing::info!(
+            session_id = session.session_id,
+            message = preview,
+            skipped_tools = ?skipped_tools,
+            "applying steering interrupt"
+        );
+
+        messages.push(ChatMessage::user(rendered));
+        messages.push(ChatMessage::assistant(
+            Some(STEERING_ACK.to_string()),
+            Vec::new(),
+        ));
+
+        if let Some(sender) = sender {
+            let event = ChatEvent::Steering {
+                message: preview,
+                skipped_tools,
+            };
+            let sender = sender.clone();
+            tokio::spawn(async move {
+                let _ = try_send_stream_event(&sender, event).await;
+            });
+        }
+
+        Ok(true)
     }
 
     fn apply_todo_reminder(
@@ -1382,6 +1564,25 @@ fn build_response_history(
     output
 }
 
+fn append_reply_segment(reply: &mut String, segment: &str) {
+    if segment.trim().is_empty() {
+        return;
+    }
+    if reply.trim().is_empty() {
+        *reply = segment.to_string();
+        return;
+    }
+    reply.push_str("\n\n");
+    reply.push_str(segment);
+}
+
+fn render_inbox_block(tag: &str, items: &[serde_json::Value]) -> Result<String> {
+    Ok(format!(
+        "<{tag}>{}</{tag}>",
+        serde_json::to_string_pretty(items).context("failed to encode inbox messages")?
+    ))
+}
+
 fn build_subagent_initial_messages(prompt: &str) -> Vec<ChatMessage> {
     vec![
         ChatMessage::system(
@@ -1579,7 +1780,20 @@ mod tests {
         build_subagent_initial_messages, extract_output_files, log_final_reply,
         resolve_max_iterations, static_public_tool_schemas,
     };
+    use crate::config::model::AppConfig;
     use crate::domain::chat::models::LlmOverrides;
+    use crate::domain::chat::orchestrator::ChatOrchestrator;
+    use crate::domain::events::service::EventService;
+    use crate::domain::memory::service::UserMemoryService;
+    use crate::domain::session::service::SessionService;
+    use crate::domain::skills::service::SkillService;
+    use crate::domain::tasks::service::TaskService;
+    use crate::domain::worktree::service::WorktreeService;
+    use crate::infra::fs::skill_store::FileSkillStore;
+    use crate::infra::fs::user_memory_store::FileMemoryStore;
+    use crate::infra::llm::client::LlmClient;
+    use crate::infra::llm::types::{ChatMessage, FunctionCall, ToolCall};
+    use crate::infra::mcp::client::McpClient;
     use std::collections::HashSet;
     use std::fs;
     use std::io::{self, Write};
@@ -1725,6 +1939,79 @@ mod tests {
     }
 
     #[test]
+    fn steering_interrupt_injects_follow_up_and_reports_skipped_tools() {
+        let repo = TestRepo::new();
+        let orchestrator = build_test_orchestrator(&repo.root);
+        let session_service = SessionService::new(repo.root.clone());
+        let session = session_service.get_or_create("steering-test").unwrap();
+        let generation = session.begin_agent_run();
+        session
+            .push_steering_message("先暂停剩余工具，重新评估", generation)
+            .unwrap();
+
+        let mut messages = vec![ChatMessage::system("system")];
+        let tool_calls = vec![
+            ToolCall {
+                id: "tool-1".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "read_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+            ToolCall {
+                id: "tool-2".to_string(),
+                kind: "function".to_string(),
+                function: FunctionCall {
+                    name: "write_file".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            },
+        ];
+
+        let interrupted = orchestrator
+            .apply_steering_interrupt(
+                &mut messages,
+                Some(session.as_ref()),
+                Some(generation),
+                Some(&tool_calls[1..]),
+                None,
+            )
+            .unwrap();
+
+        assert!(interrupted);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, "user");
+        assert!(
+            messages[1]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("<steering>")
+        );
+        assert!(
+            messages[1]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("先暂停剩余工具，重新评估")
+        );
+        assert_eq!(messages[2].role, "assistant");
+        assert_eq!(messages[2].content.as_deref(), Some(super::STEERING_ACK));
+        assert!(session.drain_steering_messages(generation).unwrap().is_empty());
+        session.end_agent_run(generation);
+    }
+
+    #[test]
+    fn append_reply_segment_concatenates_multiple_visible_replies() {
+        let mut reply = String::new();
+        super::append_reply_segment(&mut reply, "第一段");
+        super::append_reply_segment(&mut reply, "");
+        super::append_reply_segment(&mut reply, "第二段");
+        assert_eq!(reply, "第一段\n\n第二段");
+    }
+
+    #[test]
     fn extract_output_files_only_returns_files_from_outputs_directory() {
         let repo = TestRepo::new();
         let outputs = repo.root.join("outputs");
@@ -1785,6 +2072,34 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.root);
         }
+    }
+
+    fn build_test_orchestrator(repo_root: &std::path::Path) -> ChatOrchestrator {
+        let config = AppConfig::default();
+        let repo_root = repo_root.to_path_buf();
+        let memory_store =
+            FileMemoryStore::new(repo_root.clone(), config.memory.file_memory.clone());
+        let skill_store = FileSkillStore::new(repo_root.join("skills"), memory_store.clone());
+        let memory_service = UserMemoryService::new(memory_store);
+        let skill_service = SkillService::new(skill_store);
+        let event_service = EventService::new(repo_root.clone()).unwrap();
+        let task_service = TaskService::new(repo_root.clone()).unwrap();
+        let worktree_service =
+            WorktreeService::new(repo_root.clone(), task_service.clone(), event_service).unwrap();
+        let session_service = SessionService::new(repo_root.clone());
+        let llm_client = LlmClient::new(&config).unwrap();
+        let mcp_client = McpClient::new(&config).unwrap();
+        ChatOrchestrator::new(
+            repo_root,
+            config,
+            llm_client,
+            mcp_client,
+            memory_service,
+            skill_service,
+            task_service,
+            worktree_service,
+            session_service,
+        )
     }
 
     #[derive(Clone, Default)]
