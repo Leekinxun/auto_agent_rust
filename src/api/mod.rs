@@ -989,6 +989,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn smoke_tests_accept_form_encoded_session_steering_messages() {
+        let harness = setup_harness().await;
+        let session_id = "steering-form-demo";
+        let ctx = harness
+            .state
+            .session_service
+            .get_or_create(session_id)
+            .unwrap();
+        let generation = ctx.begin_agent_run();
+
+        let steering = harness
+            .client
+            .post(format!(
+                "{}/agent/session/{}/steering",
+                harness.base_url, session_id
+            ))
+            .form(&[("content", "Please stop after the next tool")])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(steering["status"], json!("queued"));
+        assert_eq!(steering["session_id"], json!(session_id));
+
+        let steering_items = ctx.drain_steering_messages(generation).unwrap();
+        assert_eq!(steering_items.len(), 1);
+        assert_eq!(steering_items[0]["type"], json!("steering"));
+        assert_eq!(
+            steering_items[0]["content"],
+            json!("Please stop after the next tool")
+        );
+        ctx.end_agent_run(generation);
+
+        harness.state.session_service.delete(session_id);
+    }
+
+    #[tokio::test]
     async fn smoke_tests_apply_steering_to_active_run_without_leaking_to_next_run() {
         let harness = setup_harness().await;
         let session_id = "steering-e2e";

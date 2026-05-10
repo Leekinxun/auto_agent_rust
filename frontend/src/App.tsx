@@ -1023,10 +1023,7 @@ export default function App() {
     try {
       await fetchJson(`/agent/session/${encodeURIComponent(config.sessionId)}/steering`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
+        body: new URLSearchParams({
           content: submission.message
         })
       });

@@ -1,9 +1,11 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Multipart, Path, Query, State};
+use axum::http::{Method, header};
 use axum::response::sse::{Event, KeepAlive, Sse};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Json, Router, body::Bytes};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::mpsc;
@@ -26,7 +28,7 @@ pub fn router() -> Router<SharedState> {
         .route("/memory/stream", post(agent_memory_stream))
         .route(
             "/session/{session_id}/steering",
-            post(agent_session_steering),
+            post(agent_session_steering).options(agent_session_steering_options),
         )
         .route("/settings/prompts", get(agent_prompt_settings))
         .route("/settings/mcp", get(agent_mcp_settings))
@@ -150,8 +152,11 @@ async fn agent_memory_stream(
 async fn agent_session_steering(
     Path(session_id): Path<String>,
     State(state): State<SharedState>,
-    Json(payload): Json<SteeringRequest>,
+    method: Method,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
 ) -> ApiResult<Json<SteeringResponse>> {
+    let payload = parse_steering_request(method, &headers, &body)?;
     let content = payload.content.trim();
     if content.is_empty() {
         return Err(ApiError::bad_request("content 不能为空"));
@@ -170,6 +175,40 @@ async fn agent_session_steering(
         }
         .into(),
     ))
+}
+
+async fn agent_session_steering_options() -> impl IntoResponse {
+    axum::http::StatusCode::NO_CONTENT
+}
+
+fn parse_steering_request(
+    method: Method,
+    headers: &axum::http::HeaderMap,
+    body: &Bytes,
+) -> ApiResult<SteeringRequest> {
+    if method != Method::POST {
+        return Err(ApiError::bad_request("仅支持 POST"));
+    }
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if content_type.contains("application/json") {
+        return serde_json::from_slice::<SteeringRequest>(body)
+            .map_err(|_| ApiError::bad_request("steering 请求体必须是合法 JSON"));
+    }
+
+    if content_type.contains("application/x-www-form-urlencoded") || content_type.is_empty() {
+        return serde_urlencoded::from_bytes::<SteeringRequest>(body)
+            .map_err(|_| ApiError::bad_request("steering 表单参数不合法"));
+    }
+
+    Err(ApiError::bad_request(format!(
+        "不支持的 steering Content-Type: {}",
+        content_type
+    )))
 }
 
 async fn build_stream_response(
