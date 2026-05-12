@@ -10,6 +10,14 @@
 - `skills/`: 公共 skills
 - `docs/`: 重构设计文档
 
+## 接口文档
+
+- Agent 接口文档（流式 + 非流式）：[`docs/agent-streaming-api.md`](docs/agent-streaming-api.md)
+
+## 学习文档
+
+- 后端学习手册（Rust + 项目入门）：[`docs/backend-learning-manual.md`](docs/backend-learning-manual.md)
+
 ## 本地启动
 
 ### 1. 构建前端静态资源
