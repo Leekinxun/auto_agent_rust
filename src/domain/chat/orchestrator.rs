@@ -18,6 +18,16 @@ use crate::domain::chat::models::{
     HistoryEntry, McpServerPreviewDto, McpSettingsPreview, OutputFile, SkillUsage,
     SystemPromptPreview,
 };
+use crate::domain::harness::HarnessAssets;
+use crate::domain::harness::snapshot::current_harness_snapshot_id;
+use crate::domain::harness::trace::{
+    HarnessRunTrace, HarnessTraceOutcome, HarnessTracePrompts, HarnessTraceRequest, new_trace_id,
+    now_ms, write_harness_run_trace,
+};
+use crate::domain::harness::{
+    MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH, PromptSource,
+    SKILL_LEARNING_SYSTEM_PATH, SKILL_LEARNING_USER_TEMPLATE_PATH, resolve_repo_prompt_source,
+};
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::{SessionContext, SessionService};
 use crate::domain::skills::models::{SkillDocument, SkillScope};
@@ -38,12 +48,12 @@ const PAST_CONTEXT_TAG: &str = "past_context";
 const PAST_CONTEXT_ACK: &str = "Noted. I'll reference this context only if relevant.";
 const SEARCH_LAZY_MCP_TOOLS_TOOL: &str = "search_lazy_mcp_tools";
 const ACTIVATE_LAZY_MCP_TOOLS_TOOL: &str = "activate_lazy_mcp_tools";
-const STEERING_ACK: &str = "Noted steering update. Re-evaluating before running more tools.";
 
 #[derive(Clone)]
 pub struct ChatOrchestrator {
     repo_root: PathBuf,
     config: AppConfig,
+    harness: HarnessAssets,
     llm_client: LlmClient,
     mcp_client: McpClient,
     memory_service: UserMemoryService,
@@ -57,6 +67,7 @@ impl ChatOrchestrator {
     pub fn new(
         repo_root: PathBuf,
         config: AppConfig,
+        harness: HarnessAssets,
         llm_client: LlmClient,
         mcp_client: McpClient,
         memory_service: UserMemoryService,
@@ -68,6 +79,7 @@ impl ChatOrchestrator {
         Self {
             repo_root,
             config,
+            harness,
             llm_client,
             mcp_client,
             memory_service,
@@ -88,13 +100,19 @@ impl ChatOrchestrator {
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
         let mut rounds_without_todo = 0usize;
+        let mut iterations = 0usize;
+        let mut tool_names = Vec::new();
+        let mut final_reply_recovered = false;
         let active_run_generation = prepared
             .session
             .as_deref()
             .map(SessionContext::begin_agent_run);
+        let started_at_ms = now_ms();
+        let trace_id = new_trace_id();
 
         let run_result: Result<()> = async {
             for _ in 0..max_iterations {
+                iterations += 1;
                 microcompact(&mut messages);
                 if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
                     messages = auto_compact(
@@ -153,6 +171,7 @@ impl ChatOrchestrator {
                 let mut compress_requested = false;
                 let mut steering_interrupted = false;
                 for (index, tool_call) in tool_calls.iter().enumerate() {
+                    tool_names.push(tool_call.function.name.clone());
                     let result = self
                         .dispatch_public_tool(
                             tool_call,
@@ -206,11 +225,36 @@ impl ChatOrchestrator {
         }
         .await;
 
-        if let (Some(session), Some(generation)) = (prepared.session.as_deref(), active_run_generation) {
+        if let (Some(session), Some(generation)) =
+            (prepared.session.as_deref(), active_run_generation)
+        {
             session.end_agent_run(generation);
         }
 
-        run_result?;
+        if let Err(error) = run_result {
+            self.persist_harness_trace(build_harness_trace(
+                &prepared.trace_request,
+                &prepared.trace_prompts,
+                &trace_id,
+                &prepared.trace_snapshot_id,
+                started_at_ms,
+                "sync",
+                mode.as_str(),
+                "error".to_string(),
+                finish_reason.clone(),
+                Some(format!("{error:#}")),
+                iterations,
+                &tool_names,
+                0,
+                &[],
+                &skill_usages,
+                0,
+                false,
+                final_reply_recovered,
+            ))
+            .await;
+            return Err(error);
+        }
 
         if reply.trim().is_empty() {
             if let Some(recovered_reply) = self
@@ -219,6 +263,7 @@ impl ChatOrchestrator {
             {
                 reply = recovered_reply;
                 finish_reason = "stop".to_string();
+                final_reply_recovered = true;
             }
         }
 
@@ -244,6 +289,27 @@ impl ChatOrchestrator {
                 &prepared.prompt_overrides,
             )
             .await;
+        self.persist_harness_trace(build_harness_trace(
+            &prepared.trace_request,
+            &prepared.trace_prompts,
+            &trace_id,
+            &prepared.trace_snapshot_id,
+            started_at_ms,
+            "sync",
+            mode.as_str(),
+            "success".to_string(),
+            finish_reason.clone(),
+            None,
+            iterations,
+            &tool_names,
+            reply.chars().count(),
+            &output_files,
+            &skill_usages,
+            skills_updated.len(),
+            mode.allows_self_evolution(),
+            final_reply_recovered,
+        ))
+        .await;
 
         Ok(ChatResult {
             reply,
@@ -267,13 +333,20 @@ impl ChatOrchestrator {
         let mut mcp_tool_selection = McpToolSelection::default();
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
+        let mut iterations = 0usize;
+        let mut tool_names = Vec::new();
+        let mut final_reply_recovered = false;
+        let mut final_finish_reason = "stop".to_string();
         let active_run_generation = prepared
             .session
             .as_deref()
             .map(SessionContext::begin_agent_run);
+        let started_at_ms = now_ms();
+        let trace_id = new_trace_id();
 
         let stream_result: Result<()> = async {
             for _ in 0..max_iterations {
+                iterations += 1;
                 if sender.is_closed() {
                     tracing::info!("stream receiver closed before next iteration");
                     return Ok(());
@@ -336,8 +409,8 @@ impl ChatOrchestrator {
                             if payload == "[DONE]" {
                                 continue;
                             }
-                            let chunk: StreamChunk =
-                                serde_json::from_str(&payload).context("invalid llm stream json")?;
+                            let chunk: StreamChunk = serde_json::from_str(&payload)
+                                .context("invalid llm stream json")?;
                             for choice in chunk.choices {
                                 if let Some(content) = choice.delta.content {
                                     if !content.is_empty() {
@@ -391,13 +464,18 @@ impl ChatOrchestrator {
                         {
                             full_reply = recovered_reply.clone();
                             finish_reason = "stop".to_string();
-                            if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
+                            final_reply_recovered = true;
+                            if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply))
+                                .await
+                            {
                                 return Ok(());
                             }
                         } else {
-                            let detail = build_empty_stream_reply_error(&finish_reason, max_iterations);
+                            let detail =
+                                build_empty_stream_reply_error(&finish_reason, max_iterations);
                             tracing::warn!(finish_reason, "stream ended without visible reply");
-                            let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
+                            let _ =
+                                try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
                             return Ok(());
                         }
                     }
@@ -414,7 +492,9 @@ impl ChatOrchestrator {
 
                     let output_files = extract_output_files(&self.repo_root, &full_reply);
                     if !output_files.is_empty() {
-                        if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files)).await {
+                        if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files))
+                            .await
+                        {
                             return Ok(());
                         }
                     }
@@ -426,6 +506,16 @@ impl ChatOrchestrator {
                         full_reply.clone(),
                         skill_usages.clone(),
                         prepared.prompt_overrides.clone(),
+                        prepared.trace_request.clone(),
+                        prepared.trace_prompts.clone(),
+                        trace_id.clone(),
+                        prepared.trace_snapshot_id.clone(),
+                        started_at_ms,
+                        "stream".to_string(),
+                        finish_reason.clone(),
+                        iterations,
+                        tool_names.clone(),
+                        final_reply_recovered,
                     );
                     log_final_reply(
                         &mode,
@@ -434,6 +524,31 @@ impl ChatOrchestrator {
                         &finish_reason,
                         &full_reply,
                     );
+                    final_finish_reason = finish_reason.clone();
+                    if !mode.allows_self_evolution() {
+                        let output_files = extract_output_files(&self.repo_root, &full_reply);
+                        self.persist_harness_trace(build_harness_trace(
+                            &prepared.trace_request,
+                            &prepared.trace_prompts,
+                            &trace_id,
+                            &prepared.trace_snapshot_id,
+                            started_at_ms,
+                            "stream",
+                            mode.as_str(),
+                            "success".to_string(),
+                            finish_reason.clone(),
+                            None,
+                            iterations,
+                            &tool_names,
+                            full_reply.chars().count(),
+                            &output_files,
+                            &skill_usages,
+                            0,
+                            false,
+                            final_reply_recovered,
+                        ))
+                        .await;
+                    }
                     let _ = try_send_stream_event(&sender, ChatEvent::Done { finish_reason }).await;
                     return Ok(());
                 }
@@ -441,6 +556,7 @@ impl ChatOrchestrator {
                 let mut compress_requested = false;
                 let mut steering_interrupted = false;
                 for (index, tool_call) in tool_calls.iter().enumerate() {
+                    tool_names.push(tool_call.function.name.clone());
                     if !try_send_stream_event(
                         &sender,
                         ChatEvent::ToolUse {
@@ -517,11 +633,16 @@ impl ChatOrchestrator {
             let mut final_finish_reason = "max_iterations".to_string();
             if full_reply.trim().is_empty() {
                 if let Some(recovered_reply) = self
-                    .recover_missing_final_reply(&messages, &prepared.llm_overrides, "max_iterations")
+                    .recover_missing_final_reply(
+                        &messages,
+                        &prepared.llm_overrides,
+                        "max_iterations",
+                    )
                     .await?
                 {
                     full_reply = recovered_reply.clone();
                     final_finish_reason = "stop".to_string();
+                    final_reply_recovered = true;
                     if !try_send_stream_event(&sender, ChatEvent::Text(recovered_reply)).await {
                         return Ok(());
                     }
@@ -554,6 +675,16 @@ impl ChatOrchestrator {
                 full_reply.clone(),
                 skill_usages.clone(),
                 prepared.prompt_overrides.clone(),
+                prepared.trace_request.clone(),
+                prepared.trace_prompts.clone(),
+                trace_id.clone(),
+                prepared.trace_snapshot_id.clone(),
+                started_at_ms,
+                "stream".to_string(),
+                final_finish_reason.clone(),
+                iterations,
+                tool_names.clone(),
+                final_reply_recovered,
             );
             log_final_reply(
                 &mode,
@@ -562,18 +693,76 @@ impl ChatOrchestrator {
                 &final_finish_reason,
                 &full_reply,
             );
+            if !mode.allows_self_evolution() {
+                let output_files = extract_output_files(&self.repo_root, &full_reply);
+                self.persist_harness_trace(build_harness_trace(
+                    &prepared.trace_request,
+                    &prepared.trace_prompts,
+                    &trace_id,
+                    &prepared.trace_snapshot_id,
+                    started_at_ms,
+                    "stream",
+                    mode.as_str(),
+                    "success".to_string(),
+                    final_finish_reason.clone(),
+                    None,
+                    iterations,
+                    &tool_names,
+                    full_reply.chars().count(),
+                    &output_files,
+                    &skill_usages,
+                    0,
+                    false,
+                    final_reply_recovered,
+                ))
+                .await;
+            }
             Ok(())
         }
         .await;
 
-        if let (Some(session), Some(generation)) = (prepared.session.as_deref(), active_run_generation) {
+        if let (Some(session), Some(generation)) =
+            (prepared.session.as_deref(), active_run_generation)
+        {
             session.end_agent_run(generation);
         }
 
-        stream_result
+        if let Err(error) = stream_result {
+            self.persist_harness_trace(build_harness_trace(
+                &prepared.trace_request,
+                &prepared.trace_prompts,
+                &trace_id,
+                &prepared.trace_snapshot_id,
+                started_at_ms,
+                "stream",
+                mode.as_str(),
+                "error".to_string(),
+                final_finish_reason,
+                Some(format!("{error:#}")),
+                iterations,
+                &tool_names,
+                full_reply.chars().count(),
+                &[],
+                &skill_usages,
+                0,
+                false,
+                final_reply_recovered,
+            ))
+            .await;
+            return Err(error);
+        }
+
+        Ok(())
     }
 
     fn prepare_request(&self, request: ChatRequest, mode: &ChatMode) -> Result<PreparedRequest> {
+        let resolved_max_iterations =
+            max_iterations_from_request(&request.llm_overrides, self.config.agent.max_iterations);
+        let trace_request =
+            build_trace_request(&request, mode, &self.config, resolved_max_iterations);
+        let trace_prompts = build_trace_prompts(&self.repo_root, &self.harness, &request, mode);
+        let trace_snapshot_id =
+            current_harness_snapshot_id(&self.repo_root, &self.config, &self.harness)?;
         let cleaned_history = if matches!(mode, ChatMode::Memory) {
             strip_cross_session_injections(request.history)
         } else {
@@ -622,6 +811,9 @@ impl ChatOrchestrator {
             llm_overrides: request.llm_overrides,
             prompt_overrides: request.prompt_overrides,
             mcp_overrides: request.mcp_overrides,
+            trace_request,
+            trace_prompts,
+            trace_snapshot_id,
         })
     }
 
@@ -683,11 +875,7 @@ impl ChatOrchestrator {
             .map(|items| self.skill_service.render_descriptions(&items))
             .unwrap_or_else(|_| "(no skills available)".to_string());
 
-        let base = format!(
-            "You are a coding agent at {}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable. IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be written under /app/outputs/ inside the container. In this workspace that maps to {}/outputs/. Do not place downloadable deliverables in uploads, memory files, or other directories.",
-            self.repo_root.display(),
-            self.repo_root.display()
-        );
+        let base = self.harness.render_system_base(&self.repo_root);
         if descriptions == "(no skills available)" {
             base
         } else {
@@ -736,6 +924,7 @@ impl ChatOrchestrator {
         if mcp_overrides.is_some_and(|overrides| overrides.has_lazy_endpoints()) {
             tools.extend(lazy_mcp_control_tool_schemas());
         }
+        self.harness.apply_tool_descriptions(&mut tools);
         tools
     }
 
@@ -1016,7 +1205,10 @@ impl ChatOrchestrator {
     }
 
     async fn run_subagent(&self, prompt: &str, agent_type: &str) -> String {
-        let mut messages = build_subagent_initial_messages(prompt);
+        let mut messages = build_subagent_initial_messages(
+            self.harness.render_subagent_system(agent_type),
+            prompt,
+        );
         let mut final_reply = "(no summary)".to_string();
         let mut tools = vec![json!({
             "type": "function",
@@ -1063,6 +1255,7 @@ impl ChatOrchestrator {
                 }
             }));
         }
+        self.harness.apply_tool_descriptions(&mut tools);
 
         for _ in 0..self.config.agent.subagent_max_iterations {
             let response = match self
@@ -1129,9 +1322,9 @@ impl ChatOrchestrator {
         );
 
         let mut recovery_messages = messages.to_vec();
-        recovery_messages.push(ChatMessage::user(build_missing_reply_recovery_prompt(
-            finish_reason,
-        )));
+        recovery_messages.push(ChatMessage::user(
+            self.harness.render_final_answer_recovery(finish_reason),
+        ));
 
         let response = self
             .llm_client
@@ -1162,7 +1355,7 @@ impl ChatOrchestrator {
         skill_usages: &[SkillUsage],
         prompt_overrides: &AgentPromptOverrides,
     ) -> Vec<SkillDocument> {
-        if !matches!(mode, ChatMode::Memory) {
+        if !mode.allows_self_evolution() {
             return Vec::new();
         }
 
@@ -1270,7 +1463,7 @@ impl ChatOrchestrator {
                 "<background-results>\n{text}\n</background-results>"
             )));
             messages.push(ChatMessage::assistant(
-                Some("Noted background results.".to_string()),
+                Some(self.harness.background_results_ack().to_string()),
                 Vec::new(),
             ));
         }
@@ -1279,7 +1472,7 @@ impl ChatOrchestrator {
         if !inbox.is_empty() {
             messages.push(ChatMessage::user(render_inbox_block("inbox", &inbox)?));
             messages.push(ChatMessage::assistant(
-                Some("Noted inbox messages.".to_string()),
+                Some(self.harness.inbox_ack().to_string()),
                 Vec::new(),
             ));
         }
@@ -1294,7 +1487,7 @@ impl ChatOrchestrator {
                 "steering", &steering,
             )?));
             messages.push(ChatMessage::assistant(
-                Some(STEERING_ACK.to_string()),
+                Some(self.harness.steering_ack().to_string()),
                 Vec::new(),
             ));
         }
@@ -1344,7 +1537,7 @@ impl ChatOrchestrator {
 
         messages.push(ChatMessage::user(rendered));
         messages.push(ChatMessage::assistant(
-            Some(STEERING_ACK.to_string()),
+            Some(self.harness.steering_ack().to_string()),
             Vec::new(),
         ));
 
@@ -1382,10 +1575,10 @@ impl ChatOrchestrator {
         };
         if session.todo.has_open_items() && *rounds_without_todo >= 3 {
             messages.push(ChatMessage::user(
-                "<reminder>Update your todos.</reminder>".to_string(),
+                self.harness.todo_reminder_user().to_string(),
             ));
             messages.push(ChatMessage::assistant(
-                Some("Noted, will update todos.".to_string()),
+                Some(self.harness.todo_reminder_ack().to_string()),
                 Vec::new(),
             ));
         }
@@ -1400,8 +1593,18 @@ impl ChatOrchestrator {
         assistant_reply: String,
         skill_usages: Vec<SkillUsage>,
         prompt_overrides: AgentPromptOverrides,
+        trace_request: HarnessTraceRequest,
+        trace_prompts: HarnessTracePrompts,
+        trace_id: String,
+        trace_snapshot_id: String,
+        started_at_ms: u128,
+        run_kind: String,
+        finish_reason: String,
+        iterations: usize,
+        tool_names: Vec<String>,
+        final_reply_recovered: bool,
     ) {
-        if !matches!(mode, ChatMode::Memory) {
+        if !mode.allows_self_evolution() {
             return;
         }
 
@@ -1418,12 +1621,45 @@ impl ChatOrchestrator {
                     &prompt_overrides,
                 )
                 .await;
+            let output_files = extract_output_files(&orchestrator.repo_root, &assistant_reply);
+            orchestrator
+                .persist_harness_trace(build_harness_trace(
+                    &trace_request,
+                    &trace_prompts,
+                    &trace_id,
+                    &trace_snapshot_id,
+                    started_at_ms,
+                    &run_kind,
+                    ChatMode::Memory.as_str(),
+                    "success".to_string(),
+                    finish_reason,
+                    None,
+                    iterations,
+                    &tool_names,
+                    assistant_reply.chars().count(),
+                    &output_files,
+                    &skill_usages,
+                    updated_skills.len(),
+                    true,
+                    final_reply_recovered,
+                ))
+                .await;
             tracing::info!(
                 user_id = user_id.as_deref().unwrap_or("-"),
                 updated_skills = updated_skills.len(),
                 "background memory side effects finished"
             );
         });
+    }
+
+    async fn persist_harness_trace(&self, trace: HarnessRunTrace) {
+        if let Err(error) = write_harness_run_trace(&self.repo_root, &trace).await {
+            tracing::warn!(
+                ?error,
+                trace_id = trace.trace_id,
+                "failed to persist harness trace"
+            );
+        }
     }
 }
 
@@ -1520,6 +1756,9 @@ struct PreparedRequest {
     llm_overrides: crate::domain::chat::models::LlmOverrides,
     prompt_overrides: AgentPromptOverrides,
     mcp_overrides: crate::domain::chat::models::McpOverrides,
+    trace_request: HarnessTraceRequest,
+    trace_prompts: HarnessTracePrompts,
+    trace_snapshot_id: String,
 }
 
 fn append_uploaded_files(
@@ -1583,11 +1822,9 @@ fn render_inbox_block(tag: &str, items: &[serde_json::Value]) -> Result<String> 
     ))
 }
 
-fn build_subagent_initial_messages(prompt: &str) -> Vec<ChatMessage> {
+fn build_subagent_initial_messages(system_prompt: String, prompt: &str) -> Vec<ChatMessage> {
     vec![
-        ChatMessage::system(
-            "You are an isolated subagent. You do not inherit the parent agent's conversation history, session state, memory files, or loaded skills unless they are explicitly included in the task prompt or tool outputs.",
-        ),
+        ChatMessage::system(system_prompt),
         ChatMessage::user(prompt.to_string()),
     ]
 }
@@ -1612,10 +1849,161 @@ fn resolve_max_iterations(
     overrides.max_iterations.unwrap_or(default_max_iterations)
 }
 
-fn build_missing_reply_recovery_prompt(finish_reason: &str) -> String {
-    format!(
-        "<final-answer-required>\nThe previous assistant attempt ended without any user-visible answer (finish_reason: {finish_reason}). Based only on the conversation and tool results already available, provide the best possible final answer now. Do not call tools. If something remains incomplete, explain that clearly.\n</final-answer-required>"
-    )
+fn max_iterations_from_request(
+    overrides: &crate::domain::chat::models::LlmOverrides,
+    default_max_iterations: usize,
+) -> usize {
+    resolve_max_iterations(overrides, default_max_iterations)
+}
+
+fn build_trace_request(
+    request: &ChatRequest,
+    mode: &ChatMode,
+    config: &AppConfig,
+    resolved_max_iterations: usize,
+) -> HarnessTraceRequest {
+    HarnessTraceRequest {
+        session_id: request.session_id.clone(),
+        user_id_present: request.user_id.is_some(),
+        history_items: request.history.len(),
+        uploaded_files: request.files.len(),
+        memory_snapshot_injected: matches!(mode, ChatMode::Memory) && request.user_id.is_some(),
+        self_evolution_allowed: mode.allows_self_evolution(),
+        resolved_model_id: request
+            .llm_overrides
+            .model_id
+            .clone()
+            .unwrap_or_else(|| config.agent.model_id.clone()),
+        resolved_max_iterations,
+        temperature: request
+            .llm_overrides
+            .temperature
+            .or(config.agent.temperature),
+        top_p: request.llm_overrides.top_p.or(config.agent.top_p),
+        mcp_base_urls: request.mcp_overrides.base_urls.len(),
+        mcp_disabled_urls: request.mcp_overrides.disabled_urls.len(),
+        mcp_lazy_urls: request.mcp_overrides.lazy_urls.len(),
+    }
+}
+
+fn build_trace_prompts(
+    repo_root: &Path,
+    harness: &HarnessAssets,
+    request: &ChatRequest,
+    _mode: &ChatMode,
+) -> HarnessTracePrompts {
+    HarnessTracePrompts {
+        top_level_system: if request.system.is_some() {
+            PromptSource::request()
+        } else {
+            harness.system_base_source().clone()
+        },
+        system_append: if request.system_append.is_some() {
+            PromptSource::request()
+        } else {
+            PromptSource::none()
+        },
+        final_answer_recovery: harness.final_answer_recovery_source().clone(),
+        subagent_shared: harness.subagent_shared_source().clone(),
+        subagent_explore: harness.subagent_explore_source().clone(),
+        subagent_general: harness.subagent_general_source().clone(),
+        memory_maintenance_system: resolve_prompt_source(
+            request.prompt_overrides.memory_maintenance_system.as_ref(),
+            repo_root,
+            MEMORY_MAINTENANCE_SYSTEM_PATH,
+        ),
+        memory_maintenance_user_template: resolve_prompt_source(
+            request
+                .prompt_overrides
+                .memory_maintenance_user_template
+                .as_ref(),
+            repo_root,
+            MEMORY_MAINTENANCE_USER_TEMPLATE_PATH,
+        ),
+        skill_learning_system: resolve_prompt_source(
+            request.prompt_overrides.skill_learning_system.as_ref(),
+            repo_root,
+            SKILL_LEARNING_SYSTEM_PATH,
+        ),
+        skill_learning_user_template: resolve_prompt_source(
+            request
+                .prompt_overrides
+                .skill_learning_user_template
+                .as_ref(),
+            repo_root,
+            SKILL_LEARNING_USER_TEMPLATE_PATH,
+        ),
+    }
+}
+
+fn resolve_prompt_source(
+    request_override: Option<&String>,
+    repo_root: &Path,
+    relative_path: &str,
+) -> PromptSource {
+    if request_override.is_some() {
+        PromptSource::request()
+    } else {
+        resolve_repo_prompt_source(repo_root, relative_path)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_harness_trace(
+    request: &HarnessTraceRequest,
+    prompts: &HarnessTracePrompts,
+    trace_id: &str,
+    harness_snapshot_id: &str,
+    started_at_ms: u128,
+    run_kind: &str,
+    mode: &str,
+    status: String,
+    finish_reason: String,
+    error: Option<String>,
+    iterations: usize,
+    tool_names: &[String],
+    reply_chars: usize,
+    output_files: &[OutputFile],
+    skill_usages: &[SkillUsage],
+    skills_updated: usize,
+    self_evolution_executed: bool,
+    final_reply_recovered: bool,
+) -> HarnessRunTrace {
+    HarnessRunTrace {
+        trace_id: trace_id.to_string(),
+        harness_snapshot_id: harness_snapshot_id.to_string(),
+        started_at_ms,
+        finished_at_ms: now_ms(),
+        run_kind: run_kind.to_string(),
+        mode: mode.to_string(),
+        request: request.clone(),
+        prompts: prompts.clone(),
+        outcome: HarnessTraceOutcome {
+            status,
+            finish_reason,
+            error,
+            iterations,
+            tool_calls: tool_names.len(),
+            tool_names: tool_names.to_vec(),
+            reply_chars,
+            output_files: output_files.len(),
+            output_file_names: output_files.iter().map(|item| item.name.clone()).collect(),
+            used_skill_names: unique_skill_names(skill_usages),
+            skills_updated,
+            final_reply_recovered,
+            self_evolution_executed,
+        },
+    }
+}
+
+fn unique_skill_names(usages: &[SkillUsage]) -> Vec<String> {
+    let mut names = usages
+        .iter()
+        .map(|item| item.name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn build_empty_stream_reply_error(finish_reason: &str, max_iterations: usize) -> String {
@@ -1776,14 +2164,14 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChatMode, append_system_instruction, build_missing_reply_recovery_prompt,
-        build_subagent_initial_messages, extract_output_files, log_final_reply,
-        resolve_max_iterations, static_public_tool_schemas,
+        ChatMode, append_system_instruction, build_subagent_initial_messages, extract_output_files,
+        log_final_reply, resolve_max_iterations, static_public_tool_schemas,
     };
     use crate::config::model::AppConfig;
     use crate::domain::chat::models::LlmOverrides;
     use crate::domain::chat::orchestrator::ChatOrchestrator;
     use crate::domain::events::service::EventService;
+    use crate::domain::harness::HarnessAssets;
     use crate::domain::memory::service::UserMemoryService;
     use crate::domain::session::service::SessionService;
     use crate::domain::skills::service::SkillService;
@@ -1883,7 +2271,12 @@ mod tests {
 
     #[test]
     fn subagent_starts_with_isolated_context_only() {
-        let messages = build_subagent_initial_messages("inspect README");
+        let repo = TestRepo::new();
+        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let messages = build_subagent_initial_messages(
+            harness.render_subagent_system("Explore"),
+            "inspect README",
+        );
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "system");
         assert!(
@@ -1893,16 +2286,51 @@ mod tests {
                 .unwrap_or_default()
                 .contains("isolated subagent")
         );
+        assert!(
+            messages[0]
+                .content
+                .as_deref()
+                .unwrap_or_default()
+                .contains("Stay read-only")
+        );
         assert_eq!(messages[1].role, "user");
         assert_eq!(messages[1].content.as_deref(), Some("inspect README"));
     }
 
     #[test]
     fn recovery_prompt_forces_final_answer_without_tools() {
-        let prompt = build_missing_reply_recovery_prompt("max_iterations");
+        let repo = TestRepo::new();
+        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let prompt = harness.render_final_answer_recovery("max_iterations");
         assert!(prompt.contains("without any user-visible answer"));
         assert!(prompt.contains("finish_reason: max_iterations"));
         assert!(prompt.contains("Do not call tools"));
+    }
+
+    #[test]
+    fn preview_system_prompt_uses_file_backed_harness_template() {
+        let repo = TestRepo::new();
+        fs::create_dir_all(repo.root.join("harness/system")).unwrap();
+        fs::write(
+            repo.root.join("harness/system/base.md"),
+            "custom-system {repo_root} -> {outputs_dir}",
+        )
+        .unwrap();
+
+        let orchestrator = build_test_orchestrator(&repo.root);
+        let preview = orchestrator.preview_system_prompts(None).unwrap();
+
+        assert!(preview.stateless_prompt.contains("custom-system"));
+        assert!(
+            preview
+                .stateless_prompt
+                .contains(&repo.root.display().to_string())
+        );
+        assert!(
+            preview
+                .stateless_prompt
+                .contains(&repo.root.join("outputs").display().to_string())
+        );
     }
 
     #[test]
@@ -1997,8 +2425,50 @@ mod tests {
                 .contains("先暂停剩余工具，重新评估")
         );
         assert_eq!(messages[2].role, "assistant");
-        assert_eq!(messages[2].content.as_deref(), Some(super::STEERING_ACK));
-        assert!(session.drain_steering_messages(generation).unwrap().is_empty());
+        assert_eq!(
+            messages[2].content.as_deref(),
+            Some(orchestrator.harness.steering_ack())
+        );
+        assert!(
+            session
+                .drain_steering_messages(generation)
+                .unwrap()
+                .is_empty()
+        );
+        session.end_agent_run(generation);
+    }
+
+    #[test]
+    fn steering_interrupt_uses_custom_harness_ack_message() {
+        let repo = TestRepo::new();
+        fs::create_dir_all(repo.root.join("harness/middleware")).unwrap();
+        fs::write(
+            repo.root.join("harness/middleware/messages.json"),
+            r#"{ "steering_ack": "Custom steering ack" }"#,
+        )
+        .unwrap();
+
+        let orchestrator = build_test_orchestrator(&repo.root);
+        let session_service = SessionService::new(repo.root.clone());
+        let session = session_service.get_or_create("steering-custom").unwrap();
+        let generation = session.begin_agent_run();
+        session
+            .push_steering_message("暂停剩余工具", generation)
+            .unwrap();
+
+        let mut messages = vec![ChatMessage::system("system")];
+        let interrupted = orchestrator
+            .apply_steering_interrupt(
+                &mut messages,
+                Some(session.as_ref()),
+                Some(generation),
+                None,
+                None,
+            )
+            .unwrap();
+
+        assert!(interrupted);
+        assert_eq!(messages[2].content.as_deref(), Some("Custom steering ack"));
         session.end_agent_run(generation);
     }
 
@@ -2087,11 +2557,13 @@ mod tests {
         let worktree_service =
             WorktreeService::new(repo_root.clone(), task_service.clone(), event_service).unwrap();
         let session_service = SessionService::new(repo_root.clone());
+        let harness = HarnessAssets::load(&repo_root).unwrap();
         let llm_client = LlmClient::new(&config).unwrap();
         let mcp_client = McpClient::new(&config).unwrap();
         ChatOrchestrator::new(
             repo_root,
             config,
+            harness,
             llm_client,
             mcp_client,
             memory_service,

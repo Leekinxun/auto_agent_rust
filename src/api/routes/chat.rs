@@ -2,8 +2,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::{Multipart, Path, Query, State};
 use axum::http::{Method, header};
-use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::IntoResponse;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router, body::Bytes};
 use futures_util::StreamExt;
@@ -17,6 +17,9 @@ use crate::app_state::SharedState;
 use crate::domain::chat::models::{
     AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
     McpOverrides, SteeringSubmission, UploadedFile,
+};
+use crate::domain::settings::{
+    SharedFrontendSettings, load_shared_frontend_settings, save_shared_frontend_settings,
 };
 
 pub fn router() -> Router<SharedState> {
@@ -32,6 +35,10 @@ pub fn router() -> Router<SharedState> {
         )
         .route("/settings/prompts", get(agent_prompt_settings))
         .route("/settings/mcp", get(agent_mcp_settings))
+        .route(
+            "/settings/shared",
+            get(get_shared_frontend_settings).post(save_shared_frontend_settings_route),
+        )
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,7 +64,7 @@ async fn agent_system_prompt(
     Query(query): Query<SystemPromptQuery>,
 ) -> ApiResult<Json<crate::domain::chat::models::SystemPromptPreview>> {
     let preview = state
-        .chat_orchestrator
+        .chat_orchestrator_clone()
         .preview_system_prompts(query.user_id.as_deref())?;
     Ok(Json(preview))
 }
@@ -66,7 +73,9 @@ async fn agent_prompt_settings(
     State(state): State<SharedState>,
 ) -> ApiResult<Json<crate::domain::chat::models::AgentPromptSettingsPreview>> {
     Ok(Json(
-        state.chat_orchestrator.preview_agent_prompt_settings(),
+        state
+            .chat_orchestrator_clone()
+            .preview_agent_prompt_settings(),
     ))
 }
 
@@ -82,10 +91,25 @@ async fn agent_mcp_settings(
     };
     Ok(Json(
         state
-            .chat_orchestrator
+            .chat_orchestrator_clone()
             .preview_mcp_settings(overrides)
             .await?,
     ))
+}
+
+async fn get_shared_frontend_settings(
+    State(state): State<SharedState>,
+) -> ApiResult<Json<SharedFrontendSettings>> {
+    Ok(Json(load_shared_frontend_settings(&state.repo_root).await?))
+}
+
+async fn save_shared_frontend_settings_route(
+    State(state): State<SharedState>,
+    Json(payload): Json<SharedFrontendSettings>,
+) -> ApiResult<Json<SharedFrontendSettings>> {
+    let normalized = payload.normalized();
+    save_shared_frontend_settings(&state.repo_root, &normalized).await?;
+    Ok(Json(normalized))
 }
 
 async fn agent_run(
@@ -97,7 +121,7 @@ async fn agent_run(
         state.session_service.touch(session_id);
     }
     let result = state
-        .chat_orchestrator
+        .chat_orchestrator_clone()
         .run(request, ChatMode::Stateless)
         .await?;
     Ok(Json(AgentResponse {
@@ -116,7 +140,7 @@ async fn agent_memory_run(
         state.session_service.touch(session_id);
     }
     let result = state
-        .chat_orchestrator
+        .chat_orchestrator_clone()
         .run(request, ChatMode::Memory)
         .await?;
     Ok(Json(MemoryAgentResponse {
@@ -224,7 +248,7 @@ async fn build_stream_response(
     }
     tokio::spawn(async move {
         let result = state
-            .chat_orchestrator
+            .chat_orchestrator_clone()
             .stream(request, mode, tx.clone())
             .await;
         if let Err(error) = result {

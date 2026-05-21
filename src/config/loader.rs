@@ -4,6 +4,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::model::AppConfig;
+use crate::domain::harness::{
+    MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH,
+    SKILL_LEARNING_SYSTEM_PATH, SKILL_LEARNING_USER_TEMPLATE_PATH,
+};
 
 pub fn find_repo_root() -> Result<PathBuf> {
     if let Ok(value) = env::var("REPO_ROOT") {
@@ -37,6 +41,7 @@ pub fn load_config(repo_root: &Path) -> Result<AppConfig> {
     let mut config: AppConfig =
         serde_yaml::from_str(&raw).context("invalid yaml in config/config.yaml")?;
     apply_env_overrides(&mut config)?;
+    apply_prompt_file_overrides(repo_root, &mut config)?;
     Ok(config)
 }
 
@@ -130,6 +135,37 @@ where
     }
 
     Ok(())
+}
+
+fn apply_prompt_file_overrides(repo_root: &Path, config: &mut AppConfig) -> Result<()> {
+    if let Some(content) = read_optional_prompt_file(repo_root, MEMORY_MAINTENANCE_SYSTEM_PATH)? {
+        config.memory.prompts.maintenance_system = content;
+    }
+    if let Some(content) =
+        read_optional_prompt_file(repo_root, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH)?
+    {
+        config.memory.prompts.maintenance_user_template = content;
+    }
+    if let Some(content) = read_optional_prompt_file(repo_root, SKILL_LEARNING_SYSTEM_PATH)? {
+        config.skills.prompts.learning_system = content;
+    }
+    if let Some(content) = read_optional_prompt_file(repo_root, SKILL_LEARNING_USER_TEMPLATE_PATH)?
+    {
+        config.skills.prompts.learning_user_template = content;
+    }
+    Ok(())
+}
+
+fn read_optional_prompt_file(repo_root: &Path, relative_path: &str) -> Result<Option<String>> {
+    let path = repo_root.join(relative_path);
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    ensure!(!content.trim().is_empty(), "{} is empty", path.display());
+    Ok(Some(content))
 }
 
 fn split_csv(raw: &str) -> Vec<String> {
@@ -304,6 +340,59 @@ mod tests {
         let loaded = load_repo_dotenv(&repo_root).unwrap();
 
         assert!(loaded.is_none());
+
+        let _ = std::fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn harness_prompt_files_override_config_prompt_strings() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time went backwards")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!("auto-claude-harness-prompts-{unique}"));
+        std::fs::create_dir_all(repo_root.join("harness/memory")).unwrap();
+        std::fs::create_dir_all(repo_root.join("harness/skills")).unwrap();
+        std::fs::write(
+            repo_root.join("harness/memory/maintenance_system.md"),
+            "memory system from file",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join("harness/memory/maintenance_user_template.md"),
+            "memory template from file",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join("harness/skills/learning_system.md"),
+            "skill system from file",
+        )
+        .unwrap();
+        std::fs::write(
+            repo_root.join("harness/skills/learning_user_template.md"),
+            "skill template from file",
+        )
+        .unwrap();
+
+        let mut config = AppConfig::default();
+        apply_prompt_file_overrides(&repo_root, &mut config).unwrap();
+
+        assert_eq!(
+            config.memory.prompts.maintenance_system,
+            "memory system from file"
+        );
+        assert_eq!(
+            config.memory.prompts.maintenance_user_template,
+            "memory template from file"
+        );
+        assert_eq!(
+            config.skills.prompts.learning_system,
+            "skill system from file"
+        );
+        assert_eq!(
+            config.skills.prompts.learning_user_template,
+            "skill template from file"
+        );
 
         let _ = std::fs::remove_dir_all(&repo_root);
     }

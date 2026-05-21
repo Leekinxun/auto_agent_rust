@@ -1,11 +1,13 @@
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
 
+use crate::config::loader::load_config;
 use crate::config::model::AppConfig;
 use crate::domain::chat::orchestrator::ChatOrchestrator;
 use crate::domain::events::service::EventService;
+use crate::domain::harness::HarnessAssets;
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::SessionService;
 use crate::domain::skills::service::SkillService;
@@ -18,7 +20,6 @@ use crate::infra::mcp::client::McpClient;
 
 pub type SharedState = Arc<AppState>;
 
-#[derive(Clone)]
 pub struct AppState {
     pub repo_root: PathBuf,
     pub config: AppConfig,
@@ -28,7 +29,7 @@ pub struct AppState {
     pub event_service: EventService,
     pub task_service: TaskService,
     pub worktree_service: WorktreeService,
-    pub chat_orchestrator: ChatOrchestrator,
+    pub chat_orchestrator: RwLock<ChatOrchestrator>,
 }
 
 impl AppState {
@@ -48,9 +49,11 @@ impl AppState {
         let session_service = SessionService::new(repo_root.clone());
         let llm_client = LlmClient::new(&config)?;
         let mcp_client = McpClient::new(&config)?;
+        let harness = HarnessAssets::load(&repo_root)?;
         let chat_orchestrator = ChatOrchestrator::new(
             repo_root.clone(),
             config.clone(),
+            harness.clone(),
             llm_client.clone(),
             mcp_client,
             memory_service.clone(),
@@ -69,7 +72,43 @@ impl AppState {
             event_service,
             task_service,
             worktree_service,
-            chat_orchestrator,
+            chat_orchestrator: RwLock::new(chat_orchestrator),
         }))
+    }
+
+    pub fn chat_orchestrator_clone(&self) -> ChatOrchestrator {
+        self.chat_orchestrator
+            .read()
+            .expect("chat orchestrator lock poisoned")
+            .clone()
+    }
+
+    pub fn reload_chat_orchestrator(&self) -> Result<()> {
+        let config_path = self.repo_root.join("config").join("config.yaml");
+        let config = if config_path.exists() {
+            load_config(&self.repo_root)?
+        } else {
+            self.config.clone()
+        };
+        let harness = HarnessAssets::load(&self.repo_root)?;
+        let llm_client = LlmClient::new(&config)?;
+        let mcp_client = McpClient::new(&config)?;
+        let chat_orchestrator = ChatOrchestrator::new(
+            self.repo_root.clone(),
+            config,
+            harness,
+            llm_client,
+            mcp_client,
+            self.memory_service.clone(),
+            self.skill_service.clone(),
+            self.task_service.clone(),
+            self.worktree_service.clone(),
+            self.session_service.clone(),
+        );
+        *self
+            .chat_orchestrator
+            .write()
+            .expect("chat orchestrator lock poisoned") = chat_orchestrator;
+        Ok(())
     }
 }

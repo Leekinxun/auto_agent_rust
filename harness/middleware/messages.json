@@ -1,0 +1,7 @@
+{
+  "background_results_ack": "Noted background results.",
+  "inbox_ack": "Noted inbox messages.",
+  "steering_ack": "Noted steering update. Re-evaluating before running more tools.",
+  "todo_reminder_user": "<reminder>Update your todos.</reminder>",
+  "todo_reminder_ack": "Noted, will update todos."
+}

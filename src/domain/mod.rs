@@ -1,7 +1,9 @@
 pub mod chat;
 pub mod events;
+pub mod harness;
 pub mod memory;
 pub mod session;
+pub mod settings;
 pub mod skills;
 pub mod tasks;
 pub mod worktree;

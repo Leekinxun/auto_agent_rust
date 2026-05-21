@@ -604,14 +604,17 @@ fn should_include_tool_schema(
             {
                 return false;
             }
-            let Some(activated_names) = selection.activated_tools_by_endpoint.get(&current_key) else {
+            let Some(activated_names) = selection.activated_tools_by_endpoint.get(&current_key)
+            else {
                 return false;
             };
             if activated_names.is_empty() {
                 return true;
             }
             let (_, actual_name) = split_prefixed_tool_name(
-                full_tool_name.strip_prefix("mcp_").unwrap_or(full_tool_name),
+                full_tool_name
+                    .strip_prefix("mcp_")
+                    .unwrap_or(full_tool_name),
             );
             activated_names.iter().any(|item| item == &actual_name)
         }

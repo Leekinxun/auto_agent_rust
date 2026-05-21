@@ -9,6 +9,19 @@ pub enum ChatMode {
     Memory,
 }
 
+impl ChatMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Stateless => "stateless",
+            Self::Memory => "memory",
+        }
+    }
+
+    pub fn allows_self_evolution(&self) -> bool {
+        matches!(self, Self::Memory)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct HistoryEntry {
     pub role: String,
@@ -208,4 +221,15 @@ impl From<McpServerPreview> for McpServerPreviewDto {
 
 fn normalize_mcp_endpoint(value: &str) -> String {
     value.trim().trim_end_matches('/').to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatMode;
+
+    #[test]
+    fn only_memory_mode_allows_self_evolution() {
+        assert!(!ChatMode::Stateless.allows_self_evolution());
+        assert!(ChatMode::Memory.allows_self_evolution());
+    }
 }

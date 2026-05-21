@@ -1,0 +1,15 @@
+{
+  "read_file": "Read file contents from the current workspace. Prefer this before editing or summarizing repository files.",
+  "write_file": "Write full file contents inside the current workspace, creating parent folders if needed. Use for whole-file creation or replacement.",
+  "edit_file": "Replace the first exact text match in a workspace file. Prefer this for small localized edits over rewriting the full file.",
+  "compress": "Compress conversation history to free up context window while preserving continuity.",
+  "task": "Spawn an isolated subagent for exploration or bounded work and return a summary to the main agent.",
+  "load_skill": "Load the full content of a named skill only when the current task needs that guidance.",
+  "search_lazy_mcp_tools": "Search hidden lazy MCP tools by capability keyword before exposing any of them to the model.",
+  "activate_lazy_mcp_tools": "Expose a small selected subset of lazy MCP tools for the next reasoning round.",
+  "TodoWrite": "Update the in-session todo checklist. Keep it concise, with at most one item in_progress.",
+  "background_run": "Run a shell command in the background and get back a task ID immediately for later polling.",
+  "spawn_teammate": "Spawn an autonomous teammate thread for a clearly bounded task and role.",
+  "task_create": "Create a new task on the shared task board for multi-step or multi-owner work.",
+  "worktree_create": "Create a git worktree, optionally bind it to a task, and isolate changes safely."
+}

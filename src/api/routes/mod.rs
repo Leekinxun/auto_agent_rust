@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod files;
 pub mod frontend;
+pub mod harness;
 pub mod health;
 pub mod memory;
 pub mod skills;
@@ -15,6 +16,7 @@ pub fn agent_router() -> Router<SharedState> {
     Router::new()
         .merge(chat::router())
         .merge(files::router())
+        .merge(harness::router())
         .merge(memory::router())
         .merge(skills::router())
         .merge(tasks::router())

@@ -5,9 +5,22 @@ import type {
   ChatModeId,
   ChatState,
   DisplayMessage,
+  HarnessApplyPreview,
+  HarnessApplyPreviewSurface,
+  HarnessApprovalChange,
+  HarnessApprovalRecord,
+  HarnessCandidateSignal,
+  HarnessDecisionDraft,
+  HarnessDecisionRecord,
+  HarnessRunTrace,
+  HarnessSignalSummary,
+  HarnessSnapshot,
+  HarnessSnapshotSurface,
+  SharedFrontendSettings,
   McpExposureMode,
   McpServerPreview,
   OutputFile,
+  PromptSource,
   ViewId
 } from "./types";
 
@@ -64,6 +77,7 @@ export const NAV_GROUPS: Array<{ title: string; items: { id: ViewId; title: stri
   {
     title: "管理",
     items: [
+      { id: "harness", title: "Harness 观测", description: "快照、trace、signals", pill: "AHE" },
       { id: "skills", title: "Skills 管理", description: "新增、编辑、刷新", pill: "CRUD" },
       { id: "settings", title: "设置", description: "配置后端地址", pill: "API" }
     ]
@@ -73,6 +87,7 @@ export const NAV_GROUPS: Array<{ title: string; items: { id: ViewId; title: stri
 export const VIEW_PATHS: Record<ViewId, string> = {
   stream: "/chat/stream",
   memoryStream: "/chat/memory-stream",
+  harness: "/harness",
   skills: "/skills",
   settings: "/settings"
 };
@@ -145,6 +160,9 @@ export function getViewFromPath(pathname: string): ViewId | null {
   }
   if (normalized.startsWith("/skills")) {
     return "skills";
+  }
+  if (normalized.startsWith("/harness")) {
+    return "harness";
   }
   if (normalized.startsWith("/settings")) {
     return "settings";
@@ -228,6 +246,388 @@ export function normalizeMcpPreviewServers(value: unknown): McpServerPreview[] {
       error: typeof server.error === "string" ? server.error : undefined
     }];
   });
+}
+
+function normalizePromptSource(value: unknown): PromptSource {
+  if (!isRecord(value)) {
+    return { kind: "none" };
+  }
+  const rawKind = typeof value.kind === "string" ? value.kind : "none";
+  return {
+    kind:
+      rawKind === "builtin" || rawKind === "file" || rawKind === "request" || rawKind === "none"
+        ? rawKind
+        : "none",
+    path: typeof value.path === "string" ? value.path : null
+  };
+}
+
+export function normalizeHarnessSnapshot(value: unknown): HarnessSnapshot | null {
+  if (!isRecord(value) || typeof value.snapshot_id !== "string") {
+    return null;
+  }
+  const surfaces: HarnessSnapshotSurface[] = Array.isArray(value.surfaces)
+    ? value.surfaces.flatMap((surface) => {
+      if (!isRecord(surface) || typeof surface.key !== "string") {
+        return [];
+      }
+      return [{
+        key: surface.key,
+        source: normalizePromptSource(surface.source),
+        sha1: typeof surface.sha1 === "string" ? surface.sha1 : "",
+        bytes: typeof surface.bytes === "number" ? surface.bytes : 0,
+        content: typeof surface.content === "string" ? surface.content : ""
+      }];
+    })
+    : [];
+
+  return {
+    snapshotId: value.snapshot_id,
+    generatedAtMs: typeof value.generated_at_ms === "number" ? value.generated_at_ms : 0,
+    memoryOnlySelfEvolution: Boolean(value.memory_only_self_evolution),
+    surfaces
+  };
+}
+
+export function normalizeHarnessSignals(value: unknown): HarnessSignalSummary | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const topTools = Array.isArray(value.top_tools)
+    ? value.top_tools.flatMap((tool) => {
+      if (!isRecord(tool) || typeof tool.name !== "string") {
+        return [];
+      }
+      return [{
+        name: tool.name,
+        count: typeof tool.count === "number" ? tool.count : 0
+      }];
+    })
+    : [];
+
+  const candidateSignals: HarnessCandidateSignal[] = Array.isArray(value.candidate_signals)
+    ? value.candidate_signals.flatMap((signal) => {
+      if (!isRecord(signal) || typeof signal.key !== "string") {
+        return [];
+      }
+      return [{
+        key: signal.key,
+        severity: typeof signal.severity === "string" ? signal.severity : "low",
+        summary: typeof signal.summary === "string" ? signal.summary : "",
+        traceIds: Array.isArray(signal.trace_ids)
+          ? signal.trace_ids.filter((item): item is string => typeof item === "string")
+          : []
+      }];
+    })
+    : [];
+
+  return {
+    inspectedTraces: typeof value.inspected_traces === "number" ? value.inspected_traces : 0,
+    memoryTraces: typeof value.memory_traces === "number" ? value.memory_traces : 0,
+    statelessTraces: typeof value.stateless_traces === "number" ? value.stateless_traces : 0,
+    successTraces: typeof value.success_traces === "number" ? value.success_traces : 0,
+    errorTraces: typeof value.error_traces === "number" ? value.error_traces : 0,
+    finalReplyRecoveredTraces:
+      typeof value.final_reply_recovered_traces === "number" ? value.final_reply_recovered_traces : 0,
+    maxIterationsTraces:
+      typeof value.max_iterations_traces === "number" ? value.max_iterations_traces : 0,
+    selfEvolutionExecutedTraces:
+      typeof value.self_evolution_executed_traces === "number" ? value.self_evolution_executed_traces : 0,
+    avgIterations: typeof value.avg_iterations === "number" ? value.avg_iterations : 0,
+    avgToolCalls: typeof value.avg_tool_calls === "number" ? value.avg_tool_calls : 0,
+    topTools,
+    candidateSignals,
+    recentTraceIds: Array.isArray(value.recent_trace_ids)
+      ? value.recent_trace_ids.filter((item): item is string => typeof item === "string")
+      : [],
+    memoryOnlySelfEvolution: Boolean(value.memory_only_self_evolution)
+  };
+}
+
+export function normalizeHarnessTraces(value: unknown): HarnessRunTrace[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((trace) => {
+    if (!isRecord(trace) || typeof trace.trace_id !== "string") {
+      return [];
+    }
+    const request = isRecord(trace.request) ? trace.request : {};
+    const prompts = isRecord(trace.prompts) ? trace.prompts : {};
+    const outcome = isRecord(trace.outcome) ? trace.outcome : {};
+
+    return [{
+      traceId: trace.trace_id,
+      harnessSnapshotId: typeof trace.harness_snapshot_id === "string" ? trace.harness_snapshot_id : "",
+      startedAtMs: typeof trace.started_at_ms === "number" ? trace.started_at_ms : 0,
+      finishedAtMs: typeof trace.finished_at_ms === "number" ? trace.finished_at_ms : 0,
+      runKind: typeof trace.run_kind === "string" ? trace.run_kind : "",
+      mode: typeof trace.mode === "string" ? trace.mode : "",
+      request: {
+        sessionId: typeof request.session_id === "string" ? request.session_id : null,
+        userIdPresent: Boolean(request.user_id_present),
+        historyItems: typeof request.history_items === "number" ? request.history_items : 0,
+        uploadedFiles: typeof request.uploaded_files === "number" ? request.uploaded_files : 0,
+        memorySnapshotInjected: Boolean(request.memory_snapshot_injected),
+        selfEvolutionAllowed: Boolean(request.self_evolution_allowed),
+        resolvedModelId: typeof request.resolved_model_id === "string" ? request.resolved_model_id : "",
+        resolvedMaxIterations:
+          typeof request.resolved_max_iterations === "number" ? request.resolved_max_iterations : 0,
+        temperature: typeof request.temperature === "number" ? request.temperature : null,
+        topP: typeof request.top_p === "number" ? request.top_p : null,
+        mcpBaseUrls: typeof request.mcp_base_urls === "number" ? request.mcp_base_urls : 0,
+        mcpDisabledUrls:
+          typeof request.mcp_disabled_urls === "number" ? request.mcp_disabled_urls : 0,
+        mcpLazyUrls: typeof request.mcp_lazy_urls === "number" ? request.mcp_lazy_urls : 0
+      },
+      prompts: {
+        topLevelSystem: normalizePromptSource(prompts.top_level_system),
+        systemAppend: normalizePromptSource(prompts.system_append),
+        finalAnswerRecovery: normalizePromptSource(prompts.final_answer_recovery),
+        subagentShared: normalizePromptSource(prompts.subagent_shared),
+        subagentExplore: normalizePromptSource(prompts.subagent_explore),
+        subagentGeneral: normalizePromptSource(prompts.subagent_general),
+        memoryMaintenanceSystem: normalizePromptSource(prompts.memory_maintenance_system),
+        memoryMaintenanceUserTemplate: normalizePromptSource(prompts.memory_maintenance_user_template),
+        skillLearningSystem: normalizePromptSource(prompts.skill_learning_system),
+        skillLearningUserTemplate: normalizePromptSource(prompts.skill_learning_user_template)
+      },
+      outcome: {
+        status: typeof outcome.status === "string" ? outcome.status : "",
+        finishReason: typeof outcome.finish_reason === "string" ? outcome.finish_reason : "",
+        error: typeof outcome.error === "string" ? outcome.error : null,
+        iterations: typeof outcome.iterations === "number" ? outcome.iterations : 0,
+        toolCalls: typeof outcome.tool_calls === "number" ? outcome.tool_calls : 0,
+        toolNames: Array.isArray(outcome.tool_names)
+          ? outcome.tool_names.filter((item): item is string => typeof item === "string")
+          : [],
+        replyChars: typeof outcome.reply_chars === "number" ? outcome.reply_chars : 0,
+        outputFiles: typeof outcome.output_files === "number" ? outcome.output_files : 0,
+        outputFileNames: Array.isArray(outcome.output_file_names)
+          ? outcome.output_file_names.filter((item): item is string => typeof item === "string")
+          : [],
+        usedSkillNames: Array.isArray(outcome.used_skill_names)
+          ? outcome.used_skill_names.filter((item): item is string => typeof item === "string")
+          : [],
+        skillsUpdated: typeof outcome.skills_updated === "number" ? outcome.skills_updated : 0,
+        finalReplyRecovered: Boolean(outcome.final_reply_recovered),
+        selfEvolutionExecuted: Boolean(outcome.self_evolution_executed)
+      }
+    }];
+  });
+}
+
+function normalizeHarnessDecisionStatus(value: unknown) {
+  return value === "accepted" || value === "rejected" ? value : "proposed";
+}
+
+export function normalizeHarnessDecisions(value: unknown): HarnessDecisionRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((decision) => {
+    if (!isRecord(decision) || typeof decision.decision_id !== "string") {
+      return [];
+    }
+    return [{
+      decisionId: decision.decision_id,
+      createdAtMs: typeof decision.created_at_ms === "number" ? decision.created_at_ms : 0,
+      title: typeof decision.title === "string" ? decision.title : "",
+      summary: typeof decision.summary === "string" ? decision.summary : "",
+      rationale: typeof decision.rationale === "string" ? decision.rationale : "",
+      expectedImpact: Array.isArray(decision.expected_impact)
+        ? decision.expected_impact.filter((item): item is string => typeof item === "string")
+        : [],
+      changedSurfaces: Array.isArray(decision.changed_surfaces)
+        ? decision.changed_surfaces.filter((item): item is string => typeof item === "string")
+        : [],
+      validationPlan: Array.isArray(decision.validation_plan)
+        ? decision.validation_plan.filter((item): item is string => typeof item === "string")
+        : [],
+      modeScope: typeof decision.mode_scope === "string" ? decision.mode_scope : "",
+      status: normalizeHarnessDecisionStatus(decision.status),
+      relatedTraceIds: Array.isArray(decision.related_trace_ids)
+        ? decision.related_trace_ids.filter((item): item is string => typeof item === "string")
+        : [],
+      snapshotBeforeId: typeof decision.snapshot_before_id === "string" ? decision.snapshot_before_id : null,
+      snapshotAfterId: typeof decision.snapshot_after_id === "string" ? decision.snapshot_after_id : null
+    }];
+  });
+}
+
+export function normalizeHarnessDrafts(value: unknown): HarnessDecisionDraft[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((draft) => {
+    if (!isRecord(draft) || typeof draft.draft_id !== "string") {
+      return [];
+    }
+    return [{
+      draftId: draft.draft_id,
+      signalKey: typeof draft.signal_key === "string" ? draft.signal_key : "",
+      severity: typeof draft.severity === "string" ? draft.severity : "low",
+      title: typeof draft.title === "string" ? draft.title : "",
+      summary: typeof draft.summary === "string" ? draft.summary : "",
+      rationale: typeof draft.rationale === "string" ? draft.rationale : "",
+      expectedImpact: Array.isArray(draft.expected_impact)
+        ? draft.expected_impact.filter((item): item is string => typeof item === "string")
+        : [],
+      changedSurfaces: Array.isArray(draft.changed_surfaces)
+        ? draft.changed_surfaces.filter((item): item is string => typeof item === "string")
+        : [],
+      validationPlan: Array.isArray(draft.validation_plan)
+        ? draft.validation_plan.filter((item): item is string => typeof item === "string")
+        : [],
+      modeScope: typeof draft.mode_scope === "string" ? draft.mode_scope : "",
+      recommendedStatus: normalizeHarnessDecisionStatus(draft.recommended_status),
+      relatedTraceIds: Array.isArray(draft.related_trace_ids)
+        ? draft.related_trace_ids.filter((item): item is string => typeof item === "string")
+        : [],
+      snapshotBeforeId: typeof draft.snapshot_before_id === "string" ? draft.snapshot_before_id : null
+    }];
+  });
+}
+
+
+function normalizeHarnessApprovalStatus(value: unknown): "approved" | "reverted" {
+  return value === "reverted" ? "reverted" : "approved";
+}
+
+function normalizeHarnessApprovalChange(value: unknown): HarnessApprovalChange | null {
+  if (!isRecord(value) || typeof value.surface_key !== "string") {
+    return null;
+  }
+  return {
+    surfaceKey: value.surface_key,
+    path: typeof value.path === "string" ? value.path : "",
+    changed: Boolean(value.changed),
+    beforeSha1: typeof value.before_sha1 === "string" ? value.before_sha1 : "",
+    afterSha1: typeof value.after_sha1 === "string" ? value.after_sha1 : "",
+    beforeBytes: typeof value.before_bytes === "number" ? value.before_bytes : 0,
+    afterBytes: typeof value.after_bytes === "number" ? value.after_bytes : 0,
+    byteDelta: typeof value.byte_delta === "number" ? value.byte_delta : 0,
+    beforeLines: typeof value.before_lines === "number" ? value.before_lines : 0,
+    afterLines: typeof value.after_lines === "number" ? value.after_lines : 0,
+    lineDelta: typeof value.line_delta === "number" ? value.line_delta : 0,
+    beforeContent: typeof value.before_content === "string" ? value.before_content : "",
+    afterContent: typeof value.after_content === "string" ? value.after_content : ""
+  };
+}
+
+export function normalizeHarnessApprovals(value: unknown): HarnessApprovalRecord[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.flatMap((approval) => {
+    if (!isRecord(approval) || typeof approval.approval_id !== "string") {
+      return [];
+    }
+    const changedSurfaces = Array.isArray(approval.changed_surfaces)
+      ? approval.changed_surfaces
+        .map((item) => normalizeHarnessApprovalChange(item))
+        .filter((item): item is HarnessApprovalChange => item !== null)
+      : [];
+    return [{
+      approvalId: approval.approval_id,
+      createdAtMs: typeof approval.created_at_ms === "number" ? approval.created_at_ms : 0,
+      decisionId: typeof approval.decision_id === "string" ? approval.decision_id : null,
+      title: typeof approval.title === "string" ? approval.title : "",
+      summary: typeof approval.summary === "string" ? approval.summary : "",
+      approvedBy: typeof approval.approved_by === "string" ? approval.approved_by : "",
+      approvalNote: typeof approval.approval_note === "string" ? approval.approval_note : null,
+      modeScope: typeof approval.mode_scope === "string" ? approval.mode_scope : "",
+      relatedTraceIds: Array.isArray(approval.related_trace_ids)
+        ? approval.related_trace_ids.filter((item): item is string => typeof item === "string")
+        : [],
+      snapshotBeforeId: typeof approval.snapshot_before_id === "string" ? approval.snapshot_before_id : "",
+      snapshotAfterId: typeof approval.snapshot_after_id === "string" ? approval.snapshot_after_id : "",
+      changedSurfaces,
+      runtimeReloaded: Boolean(approval.runtime_reloaded),
+      status: normalizeHarnessApprovalStatus(approval.status),
+      revertedFromApprovalId:
+        typeof approval.reverted_from_approval_id === "string" ? approval.reverted_from_approval_id : null
+    }];
+  });
+}
+
+function normalizeHarnessApplyPreviewSurface(value: unknown): HarnessApplyPreviewSurface | null {
+  if (!isRecord(value) || typeof value.surface_key !== "string") {
+    return null;
+  }
+  return {
+    surfaceKey: value.surface_key,
+    path: typeof value.path === "string" ? value.path : "",
+    changed: Boolean(value.changed),
+    beforeSha1: typeof value.before_sha1 === "string" ? value.before_sha1 : "",
+    afterSha1: typeof value.after_sha1 === "string" ? value.after_sha1 : "",
+    beforeBytes: typeof value.before_bytes === "number" ? value.before_bytes : 0,
+    afterBytes: typeof value.after_bytes === "number" ? value.after_bytes : 0,
+    byteDelta: typeof value.byte_delta === "number" ? value.byte_delta : 0,
+    beforeLines: typeof value.before_lines === "number" ? value.before_lines : 0,
+    afterLines: typeof value.after_lines === "number" ? value.after_lines : 0,
+    lineDelta: typeof value.line_delta === "number" ? value.line_delta : 0,
+    beforeContent: typeof value.before_content === "string" ? value.before_content : "",
+    afterContent: typeof value.after_content === "string" ? value.after_content : ""
+  };
+}
+
+export function normalizeHarnessApplyPreview(value: unknown): HarnessApplyPreview | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const snapshotBefore = normalizeHarnessSnapshot(value.snapshot_before);
+  if (!snapshotBefore) {
+    return null;
+  }
+  const surfaces = Array.isArray(value.surfaces)
+    ? value.surfaces
+      .map((item) => normalizeHarnessApplyPreviewSurface(item))
+      .filter((item): item is HarnessApplyPreviewSurface => item !== null)
+    : [];
+  return {
+    snapshotBefore,
+    expectedSnapshotId: typeof value.expected_snapshot_id === "string" ? value.expected_snapshot_id : null,
+    changedSurfaceCount: typeof value.changed_surface_count === "number" ? value.changed_surface_count : 0,
+    surfaces
+  };
+}
+
+export function normalizeSharedFrontendSettings(value: unknown): SharedFrontendSettings | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  return {
+    brandTitle: typeof value.brand_title === "string" ? value.brand_title : "",
+    brandSubtitle: typeof value.brand_subtitle === "string" ? value.brand_subtitle : "",
+    mcpConfigPath: typeof value.mcp_config_path === "string" ? value.mcp_config_path : "",
+    mcpBaseUrls: typeof value.mcp_base_urls === "string" ? value.mcp_base_urls : "",
+    mcpDisabledUrls: Array.isArray(value.mcp_disabled_urls)
+      ? value.mcp_disabled_urls.filter((item): item is string => typeof item === "string")
+      : [],
+    mcpLazyUrls: Array.isArray(value.mcp_lazy_urls)
+      ? value.mcp_lazy_urls.filter((item): item is string => typeof item === "string")
+      : [],
+    agentPromptAppend: typeof value.agent_prompt_append === "string" ? value.agent_prompt_append : "",
+    modelId: typeof value.model_id === "string" ? value.model_id : "",
+    temperature: typeof value.temperature === "string" ? value.temperature : "",
+    maxTokens: typeof value.max_tokens === "string" ? value.max_tokens : "",
+    maxIterations: typeof value.max_iterations === "string" ? value.max_iterations : "",
+    topP: typeof value.top_p === "string" ? value.top_p : "",
+    memoryMaintenanceSystemPrompt:
+      typeof value.memory_maintenance_system_prompt === "string" ? value.memory_maintenance_system_prompt : "",
+    memoryMaintenanceUserPrompt:
+      typeof value.memory_maintenance_user_prompt === "string" ? value.memory_maintenance_user_prompt : "",
+    skillLearningSystemPrompt:
+      typeof value.skill_learning_system_prompt === "string" ? value.skill_learning_system_prompt : "",
+    skillLearningUserPrompt:
+      typeof value.skill_learning_user_prompt === "string" ? value.skill_learning_user_prompt : ""
+  };
 }
 
 export function suggestFolder(value: string) {

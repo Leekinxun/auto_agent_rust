@@ -6,6 +6,14 @@ import type {
   ChatModeId,
   ChatState,
   DisplayMessage,
+  HarnessApplyPreview,
+  HarnessApprovalRecord,
+  HarnessDecisionDraft,
+  HarnessDecisionRecord,
+  HarnessRunTrace,
+  HarnessSignalSummary,
+  HarnessSnapshot,
+  SharedFrontendSettings,
   HealthState,
   HistoryEntry,
   McpExposureMode,
@@ -36,6 +44,14 @@ import {
   getSkillDetailPath,
   getViewFromPath,
   isChatView,
+  normalizeHarnessApplyPreview,
+  normalizeHarnessApprovals,
+  normalizeHarnessDecisions,
+  normalizeHarnessDrafts,
+  normalizeHarnessSignals,
+  normalizeHarnessSnapshot,
+  normalizeHarnessTraces,
+  normalizeSharedFrontendSettings,
   normalizeApiBase,
   normalizeMcpEndpoint,
   normalizeMcpPreviewServers,
@@ -71,6 +87,39 @@ type McpPreviewState = {
   loading: boolean;
   error: string;
   servers: McpServerPreview[];
+};
+
+type HarnessWorkspaceState = {
+  loading: boolean;
+  savingDraftId: string | null;
+  rollingBackApprovalId: string | null;
+  error: string;
+  snapshot: HarnessSnapshot | null;
+  signals: HarnessSignalSummary | null;
+  traces: HarnessRunTrace[];
+  decisions: HarnessDecisionRecord[];
+  approvals: HarnessApprovalRecord[];
+  drafts: HarnessDecisionDraft[];
+};
+
+type HarnessApplyPayload = {
+  decisionId?: string;
+  expectedSnapshotId?: string | null;
+  title: string;
+  summary: string;
+  rationale: string;
+  expectedImpact: string[];
+  changedSurfaces: string[];
+  validationPlan: string[];
+  modeScope?: string;
+  relatedTraceIds: string[];
+  snapshotBeforeId?: string | null;
+  approvedBy: string;
+  approvalNote?: string | null;
+  edits: Array<{
+    surfaceKey: string;
+    content: string;
+  }>;
 };
 
 type ChatTurnResult = {
@@ -344,10 +393,18 @@ function getViewHeading(view: ViewId) {
     };
   }
 
+  if (view === "harness") {
+    return {
+      eyebrow: "Harness Observatory",
+      title: "Harness 观测",
+      description: "查看当前 harness 快照、recent traces、signals、drafts 与 decision 记录，支持受控提案但不自动演化。"
+    };
+  }
+
   return {
     eyebrow: "Settings",
     title: "设置",
-    description: "配置后端地址、品牌区文案和 LLM 请求参数。设置保存在当前浏览器的本地存储中。"
+    description: "配置后端地址、品牌区文案和 LLM 请求参数。共享项会持久化到服务端，本地项仍保存在当前浏览器。"
   };
 }
 
@@ -401,6 +458,8 @@ function getNavIcon(view: ViewId) {
       return "流";
     case "memoryStream":
       return "续";
+    case "harness":
+      return "缰";
     case "skills":
       return "技";
     case "settings":
@@ -408,6 +467,51 @@ function getNavIcon(view: ViewId) {
     default:
       return "•";
   }
+}
+
+function buildSharedFrontendSettings(settings: AppSettings): SharedFrontendSettings {
+  return {
+    brandTitle: settings.brandTitle,
+    brandSubtitle: settings.brandSubtitle,
+    mcpConfigPath: settings.mcpConfigPath,
+    mcpBaseUrls: settings.mcpBaseUrls,
+    mcpDisabledUrls: settings.mcpDisabledUrls,
+    mcpLazyUrls: settings.mcpLazyUrls,
+    agentPromptAppend: settings.agentPromptAppend,
+    modelId: settings.modelId,
+    temperature: settings.temperature,
+    maxTokens: settings.maxTokens,
+    maxIterations: settings.maxIterations,
+    topP: settings.topP,
+    memoryMaintenanceSystemPrompt: settings.memoryMaintenanceSystemPrompt,
+    memoryMaintenanceUserPrompt: settings.memoryMaintenanceUserPrompt,
+    skillLearningSystemPrompt: settings.skillLearningSystemPrompt,
+    skillLearningUserPrompt: settings.skillLearningUserPrompt
+  };
+}
+
+function applySharedFrontendSettings(current: AppSettings, shared: SharedFrontendSettings): AppSettings {
+  return {
+    ...current,
+    brandTitle: shared.brandTitle || DEFAULT_SETTINGS.brandTitle,
+    brandSubtitle: shared.brandSubtitle || DEFAULT_SETTINGS.brandSubtitle,
+    mcpConfigPath: shared.mcpConfigPath,
+    mcpBaseUrls: shared.mcpBaseUrls,
+    mcpDisabledUrls: normalizeMcpUrlList(shared.mcpDisabledUrls),
+    mcpLazyUrls: normalizeMcpUrlList(
+      shared.mcpLazyUrls.filter((item) => !normalizeMcpUrlList(shared.mcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
+    ),
+    agentPromptAppend: shared.agentPromptAppend,
+    modelId: shared.modelId,
+    temperature: shared.temperature,
+    maxTokens: shared.maxTokens,
+    maxIterations: shared.maxIterations,
+    topP: shared.topP,
+    memoryMaintenanceSystemPrompt: shared.memoryMaintenanceSystemPrompt,
+    memoryMaintenanceUserPrompt: shared.memoryMaintenanceUserPrompt,
+    skillLearningSystemPrompt: shared.skillLearningSystemPrompt,
+    skillLearningUserPrompt: shared.skillLearningUserPrompt
+  };
 }
 
 function loadSettings(): AppSettings {
@@ -609,6 +713,18 @@ export default function App() {
     error: "",
     servers: []
   });
+  const [harnessWorkspace, setHarnessWorkspace] = useState<HarnessWorkspaceState>({
+    loading: false,
+    savingDraftId: null,
+    rollingBackApprovalId: null,
+    error: "",
+    snapshot: null,
+    signals: null,
+    traces: [],
+    decisions: [],
+    approvals: [],
+    drafts: []
+  });
   const mcpHealthCacheRef = useRef<McpHealthCache | null>(null);
 
   useEffect(() => {
@@ -656,6 +772,29 @@ export default function App() {
   useEffect(() => {
     document.title = settings.brandTitle.trim() || DEFAULT_SETTINGS.brandTitle;
   }, [settings.brandTitle]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    void fetchJson("/agent/settings/shared")
+      .then((data) => {
+        if (cancelled) {
+          return;
+        }
+        const shared = normalizeSharedFrontendSettings(data);
+        if (!shared) {
+          return;
+        }
+        setSettings((current) => applySharedFrontendSettings(current, shared));
+      })
+      .catch(() => {
+        // keep local fallback when shared settings are unavailable
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [settings.apiBase]);
 
   useEffect(() => {
     let cancelled = false;
@@ -781,6 +920,64 @@ export default function App() {
     }
   }, [currentView, settings.apiBase, settings.memoryUserId, skillScope]);
 
+  useEffect(() => {
+    if (currentView !== "harness") {
+      return;
+    }
+
+    let cancelled = false;
+    setHarnessWorkspace((current) => ({
+      ...current,
+      loading: true,
+      error: ""
+    }));
+
+    void Promise.all([
+      fetchJson("/agent/harness/snapshot"),
+      fetchJson("/agent/harness/signals?limit=20"),
+      fetchJson("/agent/harness/traces?limit=20"),
+      fetchJson("/agent/harness/decisions?limit=20"),
+      fetchJson("/agent/harness/approvals?limit=20"),
+      fetchJson("/agent/harness/drafts?limit=20")
+    ])
+      .then(([snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData]) => {
+        if (cancelled) {
+          return;
+        }
+        setHarnessWorkspace((current) => ({
+          ...current,
+          loading: false,
+          error: "",
+          snapshot: normalizeHarnessSnapshot(snapshotData),
+          signals: normalizeHarnessSignals(signalsData),
+          traces: normalizeHarnessTraces(tracesData),
+          decisions: normalizeHarnessDecisions(decisionsData),
+          approvals: normalizeHarnessApprovals(approvalsData),
+          drafts: normalizeHarnessDrafts(draftsData)
+        }));
+      })
+      .catch((error) => {
+        if (cancelled) {
+          return;
+        }
+        setHarnessWorkspace((current) => ({
+          ...current,
+          loading: false,
+          error: getErrorMessage(error),
+          snapshot: null,
+          signals: null,
+          traces: [],
+          decisions: [],
+          approvals: [],
+          drafts: []
+        }));
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, settings.apiBase]);
+
   function showToast(message: string, tone: ToastItem["tone"]) {
     const id = createId("toast");
     setToasts((current) => [...current, { id, message, tone }]);
@@ -815,9 +1012,41 @@ export default function App() {
     return response;
   }
 
-  async function fetchJson(path: string, init?: RequestInit) {
+  async function fetchJson<T = unknown>(path: string, init?: RequestInit): Promise<T> {
     const response = await fetchResponse(path, init);
-    return await response.json() as Record<string, unknown>;
+    return await response.json() as T;
+  }
+
+  async function persistSharedSettings(targetApiBase: string, settingsToPersist: SharedFrontendSettings) {
+    const normalizedBase = normalizeApiBase(targetApiBase || DEFAULT_SETTINGS.apiBase);
+    const response = await fetch(`${normalizedBase}/agent/settings/shared`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        brand_title: settingsToPersist.brandTitle,
+        brand_subtitle: settingsToPersist.brandSubtitle,
+        mcp_config_path: settingsToPersist.mcpConfigPath,
+        mcp_base_urls: settingsToPersist.mcpBaseUrls,
+        mcp_disabled_urls: settingsToPersist.mcpDisabledUrls,
+        mcp_lazy_urls: settingsToPersist.mcpLazyUrls,
+        agent_prompt_append: settingsToPersist.agentPromptAppend,
+        model_id: settingsToPersist.modelId,
+        temperature: settingsToPersist.temperature,
+        max_tokens: settingsToPersist.maxTokens,
+        max_iterations: settingsToPersist.maxIterations,
+        top_p: settingsToPersist.topP,
+        memory_maintenance_system_prompt: settingsToPersist.memoryMaintenanceSystemPrompt,
+        memory_maintenance_user_prompt: settingsToPersist.memoryMaintenanceUserPrompt,
+        skill_learning_system_prompt: settingsToPersist.skillLearningSystemPrompt,
+        skill_learning_user_prompt: settingsToPersist.skillLearningUserPrompt
+      })
+    });
+    if (!response.ok) {
+      throw new Error(await readError(response));
+    }
+    return normalizeSharedFrontendSettings(await response.json());
   }
 
   async function testMcpConnection() {
@@ -886,8 +1115,8 @@ export default function App() {
   async function loadSkills(silent = true) {
     setSkillsLoading(true);
     try {
-      const data = await fetchJson(buildSkillsPath());
-      const items = Array.isArray(data.skills) ? (data.skills as SkillItem[]) : [];
+      const data = await fetchJson<{ skills?: SkillItem[] }>(buildSkillsPath());
+      const items = Array.isArray(data.skills) ? data.skills : [];
       setSkills(items);
       setSkillEditor((editor) => {
         if (editor.mode === "edit" && editor.originalName) {
@@ -907,6 +1136,166 @@ export default function App() {
       }
     } finally {
       setSkillsLoading(false);
+    }
+  }
+
+  async function refreshHarnessWorkspace() {
+    setHarnessWorkspace((current) => ({
+      ...current,
+      loading: true,
+      error: ""
+    }));
+    try {
+      const [snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData] = await Promise.all([
+        fetchJson("/agent/harness/snapshot"),
+        fetchJson("/agent/harness/signals?limit=20"),
+        fetchJson("/agent/harness/traces?limit=20"),
+        fetchJson("/agent/harness/decisions?limit=20"),
+        fetchJson("/agent/harness/approvals?limit=20"),
+        fetchJson("/agent/harness/drafts?limit=20")
+      ]);
+      setHarnessWorkspace((current) => ({
+        ...current,
+        loading: false,
+        error: "",
+        snapshot: normalizeHarnessSnapshot(snapshotData),
+        signals: normalizeHarnessSignals(signalsData),
+        traces: normalizeHarnessTraces(tracesData),
+        decisions: normalizeHarnessDecisions(decisionsData),
+        approvals: normalizeHarnessApprovals(approvalsData),
+        drafts: normalizeHarnessDrafts(draftsData)
+      }));
+    } catch (error) {
+      setHarnessWorkspace((current) => ({
+        ...current,
+        loading: false,
+        error: getErrorMessage(error)
+      }));
+      throw error;
+    }
+  }
+
+  async function saveHarnessDraftAsDecision(draft: HarnessDecisionDraft) {
+    setHarnessWorkspace((current) => ({
+      ...current,
+      savingDraftId: draft.draftId
+    }));
+    try {
+      await fetchJson("/agent/harness/decisions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          title: draft.title,
+          summary: draft.summary,
+          rationale: draft.rationale,
+          expected_impact: draft.expectedImpact,
+          changed_surfaces: draft.changedSurfaces,
+          validation_plan: draft.validationPlan,
+          mode_scope: draft.modeScope,
+          status: draft.recommendedStatus,
+          related_trace_ids: draft.relatedTraceIds,
+          snapshot_before_id: draft.snapshotBeforeId ?? null,
+          snapshot_after_id: null
+        })
+      });
+      await refreshHarnessWorkspace();
+      showToast(`已保存 decision：${draft.title}`, "success");
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    } finally {
+      setHarnessWorkspace((current) => ({
+        ...current,
+        savingDraftId: null
+      }));
+    }
+  }
+
+  async function previewHarnessPayload(payload: HarnessApplyPayload): Promise<HarnessApplyPreview | null> {
+    try {
+      const data = await fetchJson("/agent/harness/preview-apply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          expected_snapshot_id: payload.expectedSnapshotId,
+          edits: payload.edits.map((edit) => ({
+            surface_key: edit.surfaceKey,
+            content: edit.content
+          }))
+        })
+      });
+      return normalizeHarnessApplyPreview(data);
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      throw error;
+    }
+  }
+
+  async function rollbackHarnessApproval(approval: HarnessApprovalRecord, approvedBy: string) {
+    setHarnessWorkspace((current) => ({
+      ...current,
+      rollingBackApprovalId: approval.approvalId
+    }));
+    try {
+      await fetchJson("/agent/harness/rollback", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          approval_id: approval.approvalId,
+          approved_by: approvedBy,
+          approval_note: `rollback from ${approval.approvalId}`
+        })
+      });
+      await refreshHarnessWorkspace();
+      showToast("已按 approval 回滚 harness 并热更新", "success");
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      throw error;
+    } finally {
+      setHarnessWorkspace((current) => ({
+        ...current,
+        rollingBackApprovalId: null
+      }));
+    }
+  }
+
+  async function applyHarnessPayload(payload: HarnessApplyPayload) {
+    try {
+      await fetchJson("/agent/harness/apply", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          decision_id: payload.decisionId,
+          expected_snapshot_id: payload.expectedSnapshotId,
+          title: payload.title,
+          summary: payload.summary,
+          rationale: payload.rationale,
+          expected_impact: payload.expectedImpact,
+          changed_surfaces: payload.changedSurfaces,
+          validation_plan: payload.validationPlan,
+          mode_scope: payload.modeScope,
+          related_trace_ids: payload.relatedTraceIds,
+          snapshot_before_id: payload.snapshotBeforeId,
+          approved_by: payload.approvedBy,
+          approval_note: payload.approvalNote,
+          edits: payload.edits.map((edit) => ({
+            surface_key: edit.surfaceKey,
+            content: edit.content
+          }))
+        })
+      });
+      await refreshHarnessWorkspace();
+      showToast("Harness 改动已写入、审批记录已落盘，并已热更新", "success");
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      throw error;
     }
   }
 
@@ -1222,7 +1611,11 @@ export default function App() {
     files: File[],
     assistantId: string
   ): Promise<ChatTurnResult> {
-    const data = await fetchJson(config.endpoint, {
+    const data = await fetchJson<{
+      reply?: string;
+      output_files?: OutputFile[];
+      skills_updated?: Array<{ name?: string; scope?: string }>;
+    }>(config.endpoint, {
       method: "POST",
       body: buildFormData(config, history, message, files, settings)
     });
@@ -1232,7 +1625,7 @@ export default function App() {
       ...current,
       text: reply,
       processing: false,
-      outputFiles: Array.isArray(data.output_files) ? (data.output_files as OutputFile[]) : [],
+      outputFiles: Array.isArray(data.output_files) ? data.output_files : [],
       processItems: [
         ...(Array.isArray(data.skills_updated)
           ? [{ event: "skills_updated", count: data.skills_updated.length, skills: data.skills_updated }]
@@ -1477,7 +1870,7 @@ export default function App() {
         ? "/agent/skills"
         : `/agent/skills/${encodeURIComponent(skillEditor.originalName || "")}`;
       const method = skillEditor.mode === "create" ? "POST" : "PUT";
-      const data = await fetchJson(path, {
+      const data = await fetchJson<{ skills?: SkillItem[]; skill?: SkillItem }>(path, {
         method,
         headers: {
           "Content-Type": "application/json"
@@ -1494,10 +1887,10 @@ export default function App() {
         })
       });
 
-      const items = Array.isArray(data.skills) ? (data.skills as SkillItem[]) : [];
+      const items = Array.isArray(data.skills) ? data.skills : [];
       setSkills(items);
       if (data.skill) {
-        const savedSkill = data.skill as SkillItem;
+        const savedSkill = data.skill;
         setSkillEditor(createEditorState(savedSkill));
         navigate(getSkillDetailPath(savedSkill.name));
       } else {
@@ -1531,10 +1924,10 @@ export default function App() {
       if (skillScope === "private") {
         params.set("user_id", skillUserId);
       }
-      const data = await fetchJson(`/agent/skills/${encodeURIComponent(skillName)}?${params.toString()}`, {
+      const data = await fetchJson<{ skills?: SkillItem[] }>(`/agent/skills/${encodeURIComponent(skillName)}?${params.toString()}`, {
         method: "DELETE"
       });
-      const items = Array.isArray(data.skills) ? (data.skills as SkillItem[]) : [];
+      const items = Array.isArray(data.skills) ? data.skills : [];
       setSkills(items);
 
       if (items.length) {
@@ -1662,6 +2055,35 @@ export default function App() {
               <Route element={renderChatWorkspace("stream")} path="/chat/stream" />
               <Route element={<Navigate replace to={getPathForView("memoryStream")} />} path="/chat/memory-run" />
               <Route element={renderChatWorkspace("memoryStream")} path="/chat/memory-stream" />
+              <Route
+                element={
+                  <HarnessWorkspace
+                    approvals={harnessWorkspace.approvals}
+                    decisions={harnessWorkspace.decisions}
+                    rollingBackApprovalId={harnessWorkspace.rollingBackApprovalId}
+                    drafts={harnessWorkspace.drafts}
+                    error={harnessWorkspace.error}
+                    loading={harnessWorkspace.loading}
+                    memoryUserId={settings.memoryUserId}
+                    savingDraftId={harnessWorkspace.savingDraftId}
+                    signals={harnessWorkspace.signals}
+                    snapshot={harnessWorkspace.snapshot}
+                    traces={harnessWorkspace.traces}
+                    onRefresh={() => {
+                      void refreshHarnessWorkspace().catch((error) => {
+                        showToast(getErrorMessage(error), "error");
+                      });
+                    }}
+                    onApply={applyHarnessPayload}
+                    onPreview={previewHarnessPayload}
+                    onRollback={rollbackHarnessApproval}
+                    onSaveDraft={(draft) => {
+                      void saveHarnessDraftAsDecision(draft);
+                    }}
+                  />
+                }
+                path="/harness"
+              />
               <Route
                 element={
                   <SkillsWorkspace
@@ -1857,34 +2279,41 @@ export default function App() {
                       setDraftSkillLearningUserPrompt(DEFAULT_SETTINGS.skillLearningUserPrompt);
                     }}
                     onSave={() => {
-                      try {
-                        const next = normalizeApiBase(draftApiBase || DEFAULT_SETTINGS.apiBase);
-                        setSettings({
-                          apiBase: next,
-                          brandTitle: draftBrandTitle.trim() || DEFAULT_SETTINGS.brandTitle,
-                          brandSubtitle: draftBrandSubtitle.trim() || DEFAULT_SETTINGS.brandSubtitle,
-                          memoryUserId: draftMemoryUserId.trim() || DEFAULT_SETTINGS.memoryUserId,
-                          mcpConfigPath: draftMcpConfigPath.trim(),
-                          mcpBaseUrls: draftMcpBaseUrls.trim(),
-                          mcpDisabledUrls: normalizeMcpUrlList(draftMcpDisabledUrls),
-                          mcpLazyUrls: normalizeMcpUrlList(
-                            draftMcpLazyUrls.filter((item) => !normalizeMcpUrlList(draftMcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
-                          ),
-                          agentPromptAppend: draftAgentPromptAppend.trim(),
-                          modelId: draftModelId.trim(),
-                          temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
-                          maxTokens: normalizeOptionalNumericSetting(draftMaxTokens, "Max Tokens", "int", 1),
-                          maxIterations: normalizeOptionalNumericSetting(draftMaxIterations, "Max Iterations", "int", 1),
-                          topP: normalizeOptionalNumericSetting(draftTopP, "Top P", "float", 0.01, 1),
-                          memoryMaintenanceSystemPrompt: draftMemoryMaintenanceSystemPrompt.trim(),
-                          memoryMaintenanceUserPrompt: draftMemoryMaintenanceUserPrompt.trim(),
-                          skillLearningSystemPrompt: draftSkillLearningSystemPrompt.trim(),
-                          skillLearningUserPrompt: draftSkillLearningUserPrompt.trim()
-                        });
-                        showToast("设置已保存", "success");
-                      } catch (error) {
-                        showToast(getErrorMessage(error), "error");
-                      }
+                      void (async () => {
+                        try {
+                          const next = normalizeApiBase(draftApiBase || DEFAULT_SETTINGS.apiBase);
+                          const nextSettings: AppSettings = {
+                            apiBase: next,
+                            brandTitle: draftBrandTitle.trim() || DEFAULT_SETTINGS.brandTitle,
+                            brandSubtitle: draftBrandSubtitle.trim() || DEFAULT_SETTINGS.brandSubtitle,
+                            memoryUserId: draftMemoryUserId.trim() || DEFAULT_SETTINGS.memoryUserId,
+                            mcpConfigPath: draftMcpConfigPath.trim(),
+                            mcpBaseUrls: draftMcpBaseUrls.trim(),
+                            mcpDisabledUrls: normalizeMcpUrlList(draftMcpDisabledUrls),
+                            mcpLazyUrls: normalizeMcpUrlList(
+                              draftMcpLazyUrls.filter((item) => !normalizeMcpUrlList(draftMcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
+                            ),
+                            agentPromptAppend: draftAgentPromptAppend.trim(),
+                            modelId: draftModelId.trim(),
+                            temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
+                            maxTokens: normalizeOptionalNumericSetting(draftMaxTokens, "Max Tokens", "int", 1),
+                            maxIterations: normalizeOptionalNumericSetting(draftMaxIterations, "Max Iterations", "int", 1),
+                            topP: normalizeOptionalNumericSetting(draftTopP, "Top P", "float", 0.01, 1),
+                            memoryMaintenanceSystemPrompt: draftMemoryMaintenanceSystemPrompt.trim(),
+                            memoryMaintenanceUserPrompt: draftMemoryMaintenanceUserPrompt.trim(),
+                            skillLearningSystemPrompt: draftSkillLearningSystemPrompt.trim(),
+                            skillLearningUserPrompt: draftSkillLearningUserPrompt.trim()
+                          };
+                          setSettings(nextSettings);
+                          const persisted = await persistSharedSettings(next, buildSharedFrontendSettings(nextSettings));
+                          if (persisted) {
+                            setSettings((current) => applySharedFrontendSettings(current, persisted));
+                          }
+                          showToast("设置已保存；共享项已持久化到服务端", "success");
+                        } catch (error) {
+                          showToast(`本地设置已更新，但共享持久化失败：${getErrorMessage(error)}`, "error");
+                        }
+                      })();
                     }}
                     onTemperatureChange={setDraftTemperature}
                     onTest={async () => {
@@ -2972,6 +3401,850 @@ function SkillsWorkspace(props: {
   );
 }
 
+function formatDateTime(timestampMs: number) {
+  if (!timestampMs) {
+    return "—";
+  }
+  return new Date(timestampMs).toLocaleString();
+}
+
+function formatDecimal(value: number, digits = 2) {
+  return Number.isFinite(value) ? value.toFixed(digits) : "0.00";
+}
+
+function describePromptSource(kind: string, path?: string | null) {
+  if (kind === "file") {
+    return path ? `file · ${path}` : "file";
+  }
+  if (kind === "request") {
+    return "request override";
+  }
+  if (kind === "builtin") {
+    return "builtin";
+  }
+  return "none";
+}
+
+function describeDecisionStatus(status: string) {
+  switch (status) {
+    case "accepted":
+      return "已采纳";
+    case "rejected":
+      return "已拒绝";
+    default:
+      return "提议中";
+  }
+}
+
+function describeModeScope(scope: string) {
+  return scope === "memory_only" ? "仅记忆模式" : "全部模式";
+}
+
+type HarnessApplyEditorState = {
+  sourceKind: "draft" | "decision";
+  decisionId?: string;
+  title: string;
+  summary: string;
+  rationale: string;
+  expectedImpact: string[];
+  changedSurfaces: string[];
+  validationPlan: string[];
+  modeScope?: string;
+  relatedTraceIds: string[];
+  snapshotBeforeId?: string | null;
+  supportedSurfaces: string[];
+  unsupportedSurfaces: string[];
+  edits: Record<string, string>;
+  approvedBy: string;
+  approvalNote: string;
+  preview: HarnessApplyPreview | null;
+};
+
+function createHarnessApplyEditorFromDraft(
+  draft: HarnessDecisionDraft,
+  snapshot: HarnessSnapshot | null,
+  defaultApprovedBy: string
+): HarnessApplyEditorState {
+  const surfaces = snapshot?.surfaces ?? [];
+  const supportedSurfaces = draft.changedSurfaces.filter((key) => surfaces.some((surface) => surface.key === key));
+  const unsupportedSurfaces = draft.changedSurfaces.filter((key) => !supportedSurfaces.includes(key));
+  const edits = Object.fromEntries(
+    supportedSurfaces.map((key) => [
+      key,
+      surfaces.find((surface) => surface.key === key)?.content || ""
+    ])
+  );
+
+  return {
+    sourceKind: "draft",
+    title: draft.title,
+    summary: draft.summary,
+    rationale: draft.rationale,
+    expectedImpact: draft.expectedImpact,
+    changedSurfaces: draft.changedSurfaces,
+    validationPlan: draft.validationPlan,
+    modeScope: draft.modeScope,
+    relatedTraceIds: draft.relatedTraceIds,
+    snapshotBeforeId: draft.snapshotBeforeId ?? snapshot?.snapshotId ?? null,
+    supportedSurfaces,
+    unsupportedSurfaces,
+    edits,
+    approvedBy: defaultApprovedBy.trim(),
+    approvalNote: "",
+    preview: null
+  };
+}
+
+function createHarnessApplyEditorFromDecision(
+  decision: HarnessDecisionRecord,
+  snapshot: HarnessSnapshot | null,
+  defaultApprovedBy: string
+): HarnessApplyEditorState {
+  const surfaces = snapshot?.surfaces ?? [];
+  const supportedSurfaces = decision.changedSurfaces.filter((key) =>
+    surfaces.some((surface) => surface.key === key)
+  );
+  const unsupportedSurfaces = decision.changedSurfaces.filter(
+    (key) => !supportedSurfaces.includes(key)
+  );
+  const edits = Object.fromEntries(
+    supportedSurfaces.map((key) => [
+      key,
+      surfaces.find((surface) => surface.key === key)?.content || ""
+    ])
+  );
+
+  return {
+    sourceKind: "decision",
+    decisionId: decision.decisionId,
+    title: decision.title,
+    summary: decision.summary,
+    rationale: decision.rationale,
+    expectedImpact: decision.expectedImpact,
+    changedSurfaces: decision.changedSurfaces,
+    validationPlan: decision.validationPlan,
+    modeScope: decision.modeScope,
+    relatedTraceIds: decision.relatedTraceIds,
+    snapshotBeforeId: decision.snapshotBeforeId ?? snapshot?.snapshotId ?? null,
+    supportedSurfaces,
+    unsupportedSurfaces,
+    edits,
+    approvedBy: defaultApprovedBy.trim(),
+    approvalNote: "",
+    preview: null
+  };
+}
+
+function formatSignedDelta(value: number) {
+  if (value > 0) {
+    return `+${value}`;
+  }
+  return String(value);
+}
+
+function HarnessWorkspace(props: {
+  loading: boolean;
+  savingDraftId: string | null;
+  error: string;
+  memoryUserId: string;
+  snapshot: HarnessSnapshot | null;
+  signals: HarnessSignalSummary | null;
+  traces: HarnessRunTrace[];
+  decisions: HarnessDecisionRecord[];
+  approvals: HarnessApprovalRecord[];
+  drafts: HarnessDecisionDraft[];
+  rollingBackApprovalId: string | null;
+  onRefresh: () => void;
+  onPreview: (payload: HarnessApplyPayload) => Promise<HarnessApplyPreview | null>;
+  onApply: (payload: HarnessApplyPayload) => Promise<void>;
+  onRollback: (approval: HarnessApprovalRecord, approvedBy: string) => Promise<void>;
+  onSaveDraft: (draft: HarnessDecisionDraft) => void;
+}) {
+  const {
+    loading,
+    savingDraftId,
+    error,
+    memoryUserId,
+    snapshot,
+    signals,
+    traces,
+    decisions,
+    approvals,
+    drafts,
+    rollingBackApprovalId,
+    onRefresh,
+    onPreview,
+    onApply,
+    onRollback,
+    onSaveDraft
+  } = props;
+  const [applyEditor, setApplyEditor] = useState<HarnessApplyEditorState | null>(null);
+  const [applySubmitting, setApplySubmitting] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+
+  const openDraftApplyEditor = (draft: HarnessDecisionDraft) => {
+    setPreviewError("");
+    setApplyEditor(createHarnessApplyEditorFromDraft(draft, snapshot, memoryUserId));
+  };
+
+  const openDecisionApplyEditor = (decision: HarnessDecisionRecord) => {
+    setPreviewError("");
+    setApplyEditor(createHarnessApplyEditorFromDecision(decision, snapshot, memoryUserId));
+  };
+
+  const updateApplyEditorSurface = (surfaceKey: string, content: string) => {
+    setPreviewError("");
+    setApplyEditor((current) => current
+      ? {
+        ...current,
+        preview: null,
+        edits: {
+          ...current.edits,
+          [surfaceKey]: content
+        }
+      }
+      : current);
+  };
+
+  const updateApplyEditorField = (field: "approvedBy" | "approvalNote", value: string) => {
+    setApplyEditor((current) => current ? { ...current, [field]: value } : current);
+  };
+
+  const buildApplyPayload = (editor: HarnessApplyEditorState): HarnessApplyPayload => ({
+    decisionId: editor.decisionId,
+    expectedSnapshotId: snapshot?.snapshotId ?? editor.snapshotBeforeId,
+    title: editor.title,
+    summary: editor.summary,
+    rationale: editor.rationale,
+    expectedImpact: editor.expectedImpact,
+    changedSurfaces: editor.changedSurfaces,
+    validationPlan: editor.validationPlan,
+    modeScope: editor.modeScope,
+    relatedTraceIds: editor.relatedTraceIds,
+    snapshotBeforeId: editor.snapshotBeforeId,
+    approvedBy: editor.approvedBy.trim(),
+    approvalNote: editor.approvalNote.trim() || null,
+    edits: editor.supportedSurfaces.map((surfaceKey) => ({
+      surfaceKey,
+      content: editor.edits[surfaceKey] || ""
+    }))
+  });
+
+  const runPreview = async () => {
+    if (!applyEditor || previewLoading || !applyEditor.supportedSurfaces.length) {
+      return;
+    }
+    setPreviewLoading(true);
+    setPreviewError("");
+    try {
+      const preview = await onPreview(buildApplyPayload(applyEditor));
+      if (!preview) {
+        throw new Error("预览响应为空");
+      }
+      setApplyEditor((current) => current ? { ...current, preview } : current);
+    } catch (error) {
+      setPreviewError(getErrorMessage(error));
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const submitApplyEditor = async () => {
+    if (!applyEditor || applySubmitting) {
+      return;
+    }
+    if (!applyEditor.supportedSurfaces.length || !applyEditor.preview) {
+      return;
+    }
+    if (!applyEditor.approvedBy.trim()) {
+      setPreviewError("审批人不能为空");
+      return;
+    }
+    setApplySubmitting(true);
+    try {
+      await onApply(buildApplyPayload(applyEditor));
+      setApplyEditor(null);
+      setPreviewError("");
+    } catch {
+      // keep editor open for further manual fixes
+    } finally {
+      setApplySubmitting(false);
+    }
+  };
+
+  return (
+    <div className="harness-grid">
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>当前总览</h3>
+            <span>只读展示当前 harness 生效快照与近期运行信号；draft 仅供人工确认后转成 decision 记录。</span>
+          </div>
+          <div className="button-row">
+            <button className="button secondary" disabled={loading} onClick={onRefresh} type="button">
+              {loading ? "刷新中..." : "刷新数据"}
+            </button>
+          </div>
+        </div>
+
+        {error ? <div className="empty-block">加载 Harness 数据失败：{error}</div> : null}
+
+        <div className="stats-grid">
+          <article className="stat-card">
+            <div className="soft-chip">Snapshot</div>
+            <h3>{snapshot?.snapshotId || "未加载"}</h3>
+            <p>{snapshot ? `${snapshot.surfaces.length} 个 surfaces · ${formatDateTime(snapshot.generatedAtMs)}` : "当前尚未取得快照"}</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Signals</div>
+            <h3>{signals ? signals.candidateSignals.length : 0}</h3>
+            <p>{signals ? `近期 traces：${signals.inspectedTraces} · tool 平均 ${formatDecimal(signals.avgToolCalls)}` : "等待 recent traces 聚合"}</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Drafts</div>
+            <h3>{drafts.length}</h3>
+            <p>来自 recent signals 的只读改进提案，不会自动改动 harness。</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Decisions</div>
+            <h3>{decisions.length}</h3>
+            <p>已经持久化到 .omx/decisions/harness 的结构化记录。</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Approvals</div>
+            <h3>{approvals.length}</h3>
+            <p>每次真正写入前后的审批轨迹与变更摘要，便于审计追溯。</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Self-Evolution</div>
+            <h3>{signals?.memoryOnlySelfEvolution || snapshot?.memoryOnlySelfEvolution ? "Memory Only" : "Unknown"}</h3>
+            <p>无痕 / stateless 模式不执行自进化；当前页面只做观测和人工提案。</p>
+          </article>
+          <article className="stat-card">
+            <div className="soft-chip">Recent Traces</div>
+            <h3>{traces.length}</h3>
+            <p>{signals ? `成功 ${signals.successTraces} · 错误 ${signals.errorTraces} · recovery ${signals.finalReplyRecoveredTraces}` : "等待 traces 加载"}</p>
+          </article>
+        </div>
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Manual Apply Workspace</h3>
+            <span>先生成预览，再人工审批并写入目标 surface。这里只是手动应用，不是 stateless 自进化。</span>
+          </div>
+        </div>
+        {!applyEditor ? (
+          <div className="empty-block">先在下方选择一个 draft 或 decision，点击“准备应用”后在这里编辑具体 surface 内容。</div>
+        ) : (
+          <div className="harness-stack">
+            <div className="preview-metadata">
+              <div className="preview-meta-item">
+                <strong>Source</strong>
+                <span>{applyEditor.sourceKind === "draft" ? "Draft" : `Decision · ${applyEditor.decisionId}`}</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Snapshot Before</strong>
+                <span>{snapshot?.snapshotId || applyEditor.snapshotBeforeId || "—"}</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Mode Scope</strong>
+                <span>{describeModeScope(applyEditor.modeScope || "memory_only")}</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Surfaces</strong>
+                <span>{applyEditor.supportedSurfaces.length} supported · {applyEditor.unsupportedSurfaces.length} unsupported</span>
+              </div>
+            </div>
+            {applyEditor.unsupportedSurfaces.length ? (
+              <div className="empty-block compact">
+                以下 surfaces 当前不支持直接写入，需要代码级调整：{applyEditor.unsupportedSurfaces.join("、")}
+              </div>
+            ) : null}
+            {!applyEditor.supportedSurfaces.length ? (
+              <div className="empty-block">当前没有可直接写入的 surface。</div>
+            ) : (
+              <>
+                {applyEditor.supportedSurfaces.map((surfaceKey) => (
+                  <label className="field" key={surfaceKey}>
+                    <span>{surfaceKey}</span>
+                    <textarea
+                      className="harness-textarea"
+                      onChange={(event) => updateApplyEditorSurface(surfaceKey, event.target.value)}
+                      value={applyEditor.edits[surfaceKey] || ""}
+                    />
+                  </label>
+                ))}
+                <div className="harness-approval-grid">
+                  <label className="field">
+                    <span>审批人</span>
+                    <input
+                      onChange={(event) => updateApplyEditorField("approvedBy", event.target.value)}
+                      placeholder="例如：lijinxuan"
+                      value={applyEditor.approvedBy}
+                    />
+                    <small>用于形成可审计的 approval record；建议默认填写当前操作人。</small>
+                  </label>
+                  <label className="field">
+                    <span>审批备注</span>
+                    <textarea
+                      className="harness-note-textarea"
+                      onChange={(event) => updateApplyEditorField("approvalNote", event.target.value)}
+                      placeholder="补充这次人工确认的依据，例如 trace 观察结论、风险说明、回滚关注点。"
+                      value={applyEditor.approvalNote}
+                    />
+                  </label>
+                </div>
+                {previewError ? <div className="empty-block compact">{previewError}</div> : null}
+                {!applyEditor.preview ? (
+                  <div className="empty-block compact">请先生成预览，再确认写入。任何 surface 内容变更都会使之前的预览失效。</div>
+                ) : (
+                  <div className="harness-stack">
+                    <div className="preview-metadata">
+                      <div className="preview-meta-item">
+                        <strong>Preview Snapshot</strong>
+                        <span>{applyEditor.preview.snapshotBefore.snapshotId}</span>
+                      </div>
+                      <div className="preview-meta-item">
+                        <strong>Changed Surfaces</strong>
+                        <span>{applyEditor.preview.changedSurfaceCount}</span>
+                      </div>
+                    </div>
+                    {applyEditor.preview.surfaces.map((surface) => (
+                      <article className="harness-item-card" key={`preview-${surface.surfaceKey}`}>
+                        <div className="harness-item-head">
+                          <div>
+                            <div className={`soft-chip ${surface.changed ? "status-accepted" : "status-proposed"}`}>{surface.changed ? "changed" : "no-op"}</div>
+                            <h4>{surface.surfaceKey}</h4>
+                            <p>{surface.path}</p>
+                          </div>
+                          <div className="preview-stat-row">
+                            <span>{formatBytes(surface.beforeBytes)} → {formatBytes(surface.afterBytes)} ({formatSignedDelta(surface.byteDelta)})</span>
+                            <span>{surface.beforeLines} 行 → {surface.afterLines} 行 ({formatSignedDelta(surface.lineDelta)})</span>
+                          </div>
+                        </div>
+                        <div className="harness-diff-grid">
+                          <div className="harness-diff-pane">
+                            <strong>Before · {surface.beforeSha1}</strong>
+                            <pre className="code-block code-block-light">{surface.beforeContent}</pre>
+                          </div>
+                          <div className="harness-diff-pane">
+                            <strong>After · {surface.afterSha1}</strong>
+                            <pre className="code-block">{surface.afterContent}</pre>
+                          </div>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+                <div className="form-actions">
+                  <div className="button-row">
+                    <button className="button ghost" onClick={() => { setApplyEditor(null); setPreviewError(""); }} type="button">取消</button>
+                    <button className="button secondary" disabled={previewLoading} onClick={() => { void runPreview(); }} type="button">
+                      {previewLoading ? "生成预览中..." : "生成预览"}
+                    </button>
+                  </div>
+                  <button
+                    className="button primary"
+                    disabled={applySubmitting || previewLoading || !applyEditor.preview || !applyEditor.approvedBy.trim()}
+                    onClick={() => { void submitApplyEditor(); }}
+                    type="button"
+                  >
+                    {applySubmitting ? "应用中..." : "确认写入并记录审批"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Decision Drafts</h3>
+            <span>由 signals 自动归纳出的候选提案。点击“保存为记录”后会进入 decision 列表，但仍不会自动应用改动。</span>
+          </div>
+        </div>
+        {loading && !drafts.length ? <div className="processing">正在生成 drafts...</div> : null}
+        {!loading && !drafts.length ? <div className="empty-block">当前 recent traces 尚未形成候选 draft。</div> : null}
+        {drafts.length ? (
+          <div className="harness-stack">
+            {drafts.map((draft) => (
+              <article className="harness-item-card" key={draft.draftId}>
+                <div className="harness-item-head">
+                  <div>
+                    <div className={`soft-chip severity-${draft.severity}`}>{draft.severity.toUpperCase()}</div>
+                    <h4>{draft.title}</h4>
+                    <p>{draft.summary}</p>
+                  </div>
+                  <div className="button-row">
+                    <span className="soft-chip">{describeModeScope(draft.modeScope)}</span>
+                    <button className="button secondary" onClick={() => openDraftApplyEditor(draft)} type="button">
+                      准备应用
+                    </button>
+                    <button
+                      className="button primary"
+                      disabled={savingDraftId === draft.draftId}
+                      onClick={() => onSaveDraft(draft)}
+                      type="button"
+                    >
+                      {savingDraftId === draft.draftId ? "保存中..." : "保存为记录"}
+                    </button>
+                  </div>
+                </div>
+                <div className="preview-metadata">
+                  <div className="preview-meta-item">
+                    <strong>Signal</strong>
+                    <span>{draft.signalKey}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Snapshot Before</strong>
+                    <span>{draft.snapshotBeforeId || "—"}</span>
+                  </div>
+                </div>
+                <div className="harness-rich-block">
+                  <strong>Rationale</strong>
+                  <p>{draft.rationale}</p>
+                </div>
+                <div className="harness-bullet-grid">
+                  <div>
+                    <strong>Expected Impact</strong>
+                    <ul>{draft.expectedImpact.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Changed Surfaces</strong>
+                    <ul>{draft.changedSurfaces.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Validation Plan</strong>
+                    <ul>{draft.validationPlan.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Related Trace IDs</strong>
+                    <ul>{draft.relatedTraceIds.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Signals</h3>
+            <span>recent traces 的聚合结果，用来支持人工判断是否值得提出 harness 变更。</span>
+          </div>
+        </div>
+        {signals ? (
+          <>
+            <div className="preview-metadata">
+              <div className="preview-meta-item">
+                <strong>Trace Coverage</strong>
+                <span>{signals.inspectedTraces} traces · memory {signals.memoryTraces} · stateless {signals.statelessTraces}</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Iterations / Tools</strong>
+                <span>{formatDecimal(signals.avgIterations)} iter · {formatDecimal(signals.avgToolCalls)} tools</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Recoveries</strong>
+                <span>{signals.finalReplyRecoveredTraces} recovery · {signals.maxIterationsTraces} max_iterations</span>
+              </div>
+              <div className="preview-meta-item">
+                <strong>Evolution</strong>
+                <span>{signals.selfEvolutionExecutedTraces} memory evolutions · stateless forbidden</span>
+              </div>
+            </div>
+            <div className="harness-bullet-grid">
+              <div>
+                <strong>Candidate Signals</strong>
+                {signals.candidateSignals.length ? (
+                  <ul>
+                    {signals.candidateSignals.map((signal) => (
+                      <li key={signal.key}>
+                        <strong>{signal.key}</strong> · {signal.summary}
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="empty-inline">暂无候选信号</div>
+                )}
+              </div>
+              <div>
+                <strong>Top Tools</strong>
+                {signals.topTools.length ? (
+                  <ul>
+                    {signals.topTools.map((tool) => (
+                      <li key={tool.name}>{tool.name} · {tool.count}</li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="empty-inline">暂无工具统计</div>
+                )}
+              </div>
+            </div>
+          </>
+        ) : (
+          <div className="empty-block">尚未加载 signals。</div>
+        )}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Approval Records</h3>
+            <span>每次真正写入 harness 后都会形成一条审批记录，包含审批人、快照前后、以及每个 surface 的差异摘要。</span>
+          </div>
+        </div>
+        {!approvals.length ? <div className="empty-block">当前还没有 approval 记录。</div> : null}
+        {approvals.length ? (
+          <div className="harness-stack">
+            {approvals.map((approval) => (
+              <details className="harness-item-card" key={approval.approvalId}>
+                <summary className="harness-summary">
+                  <div>
+                    <div className="soft-chip status-accepted">{approval.status.toUpperCase()}</div>
+                    <h4>{approval.title}</h4>
+                    <p>{approval.summary}</p>
+                  </div>
+                  <span className="harness-summary-meta">{formatDateTime(approval.createdAtMs)}</span>
+                </summary>
+                <div className="preview-metadata">
+                  <div className="preview-meta-item">
+                    <strong>Approved By</strong>
+                    <span>{approval.approvedBy}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Decision</strong>
+                    <span>{approval.decisionId || "—"}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Snapshot Before</strong>
+                    <span>{approval.snapshotBeforeId}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Snapshot After</strong>
+                    <span>{approval.snapshotAfterId}</span>
+                  </div>
+                </div>
+                {approval.approvalNote ? (
+                  <div className="harness-rich-block">
+                    <strong>Approval Note</strong>
+                    <p>{approval.approvalNote}</p>
+                  </div>
+                ) : null}
+                <div className="button-row harness-inline-actions">
+                  <button
+                    className="button secondary"
+                    disabled={rollingBackApprovalId === approval.approvalId || approval.status === "reverted"}
+                    onClick={() => { void onRollback(approval, memoryUserId); }}
+                    type="button"
+                  >
+                    {rollingBackApprovalId === approval.approvalId ? "回滚中..." : approval.status === "reverted" ? "已回滚记录" : "按此记录回滚"}
+                  </button>
+                </div>
+                <div className="harness-bullet-grid">
+                  <div>
+                    <strong>Changed Surfaces</strong>
+                    <ul>
+                      {approval.changedSurfaces.map((surface) => (
+                        <li key={`${approval.approvalId}-${surface.surfaceKey}`}>
+                          {surface.surfaceKey} · {formatBytes(surface.beforeBytes)} → {formatBytes(surface.afterBytes)} ({formatSignedDelta(surface.byteDelta)}) · {surface.beforeLines} → {surface.afterLines} 行
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                  <div>
+                    <strong>Related Traces</strong>
+                    <ul>{approval.relatedTraceIds.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                </div>
+                {approval.revertedFromApprovalId ? (
+                  <div className="empty-block compact">
+                    这是一次回滚审批，来源 approval：{approval.revertedFromApprovalId}
+                  </div>
+                ) : null}
+                <div className="harness-stack">
+                  {approval.changedSurfaces.map((surface) => (
+                    <article className="harness-item-card" key={`${approval.approvalId}-diff-${surface.surfaceKey}`}>
+                      <div className="harness-item-head">
+                        <div>
+                          <div className={`soft-chip ${surface.changed ? "status-accepted" : "status-proposed"}`}>{surface.changed ? "changed" : "no-op"}</div>
+                          <h4>{surface.surfaceKey}</h4>
+                          <p>{surface.path}</p>
+                        </div>
+                        <div className="preview-stat-row">
+                          <span>{formatBytes(surface.beforeBytes)} → {formatBytes(surface.afterBytes)} ({formatSignedDelta(surface.byteDelta)})</span>
+                          <span>{surface.beforeLines} 行 → {surface.afterLines} 行 ({formatSignedDelta(surface.lineDelta)})</span>
+                        </div>
+                      </div>
+                      <div className="harness-diff-grid">
+                        <div className="harness-diff-pane">
+                          <strong>Before · {surface.beforeSha1}</strong>
+                          <pre className="code-block code-block-light">{surface.beforeContent}</pre>
+                        </div>
+                        <div className="harness-diff-pane">
+                          <strong>After · {surface.afterSha1}</strong>
+                          <pre className="code-block">{surface.afterContent}</pre>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Decision Records</h3>
+            <span>已保存的结构化记录，便于回溯某次 harness 调整为什么发生、作用面在哪里、如何验证。</span>
+          </div>
+        </div>
+        {!decisions.length ? <div className="empty-block">当前还没有 decision 记录。</div> : null}
+        {decisions.length ? (
+          <div className="harness-stack">
+            {decisions.map((decision) => (
+              <details className="harness-item-card" key={decision.decisionId}>
+                <summary className="harness-summary">
+                  <div>
+                    <div className={`soft-chip status-${decision.status}`}>{describeDecisionStatus(decision.status)}</div>
+                    <h4>{decision.title}</h4>
+                    <p>{decision.summary}</p>
+                  </div>
+                  <span className="harness-summary-meta">{formatDateTime(decision.createdAtMs)}</span>
+                </summary>
+                <div className="button-row harness-inline-actions">
+                  <button className="button secondary" onClick={() => openDecisionApplyEditor(decision)} type="button">
+                    准备应用
+                  </button>
+                </div>
+                <div className="harness-rich-block">
+                  <strong>Rationale</strong>
+                  <p>{decision.rationale}</p>
+                </div>
+                <div className="harness-bullet-grid">
+                  <div>
+                    <strong>Changed Surfaces</strong>
+                    <ul>{decision.changedSurfaces.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Validation Plan</strong>
+                    <ul>{decision.validationPlan.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Expected Impact</strong>
+                    <ul>{decision.expectedImpact.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Related Traces</strong>
+                    <ul>{decision.relatedTraceIds.map((item) => <li key={item}>{item}</li>)}</ul>
+                  </div>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Recent Traces</h3>
+            <span>每次 run / stream 的结构化观测，包含 snapshot id、finish reason、tool 序列以及是否触发 self-evolution。</span>
+          </div>
+        </div>
+        {!traces.length ? <div className="empty-block">当前还没有 harness traces。</div> : null}
+        {traces.length ? (
+          <div className="harness-stack">
+            {traces.map((trace) => (
+              <details className="harness-item-card" key={trace.traceId}>
+                <summary className="harness-summary">
+                  <div>
+                    <div className="soft-chip">{trace.mode} · {trace.runKind}</div>
+                    <h4>{trace.traceId}</h4>
+                    <p>{trace.outcome.status} · {trace.outcome.finishReason} · tools {trace.outcome.toolCalls} · iterations {trace.outcome.iterations}</p>
+                  </div>
+                  <span className="harness-summary-meta">{formatDateTime(trace.finishedAtMs)}</span>
+                </summary>
+                <div className="preview-metadata">
+                  <div className="preview-meta-item">
+                    <strong>Snapshot</strong>
+                    <span>{trace.harnessSnapshotId}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Model</strong>
+                    <span>{trace.request.resolvedModelId}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Self-Evolution</strong>
+                    <span>{trace.request.selfEvolutionAllowed ? "allowed" : "forbidden"} · executed {String(trace.outcome.selfEvolutionExecuted)}</span>
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Recovery</strong>
+                    <span>{trace.outcome.finalReplyRecovered ? "used final-answer recovery" : "direct final answer"}</span>
+                  </div>
+                </div>
+                <div className="harness-bullet-grid">
+                  <div>
+                    <strong>Tool Names</strong>
+                    <ul>{trace.outcome.toolNames.map((item, index) => <li key={`${trace.traceId}-${item}-${index}`}>{item}</li>)}</ul>
+                  </div>
+                  <div>
+                    <strong>Prompt Sources</strong>
+                    <ul>
+                      <li>system: {describePromptSource(trace.prompts.topLevelSystem.kind, trace.prompts.topLevelSystem.path)}</li>
+                      <li>subagent shared: {describePromptSource(trace.prompts.subagentShared.kind, trace.prompts.subagentShared.path)}</li>
+                      <li>subagent explore: {describePromptSource(trace.prompts.subagentExplore.kind, trace.prompts.subagentExplore.path)}</li>
+                      <li>subagent general: {describePromptSource(trace.prompts.subagentGeneral.kind, trace.prompts.subagentGeneral.path)}</li>
+                      <li>recovery: {describePromptSource(trace.prompts.finalAnswerRecovery.kind, trace.prompts.finalAnswerRecovery.path)}</li>
+                    </ul>
+                  </div>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Snapshot Surfaces</h3>
+            <span>当前运行时真正生效的 harness surfaces。可直接看到 source、sha1、字节数和内容。</span>
+          </div>
+        </div>
+        {!snapshot ? <div className="empty-block">当前没有可展示的 snapshot。</div> : null}
+        {snapshot ? (
+          <div className="harness-stack">
+            {snapshot.surfaces.map((surface) => (
+              <details className="harness-item-card" key={surface.key}>
+                <summary className="harness-summary">
+                  <div>
+                    <div className="soft-chip">{describePromptSource(surface.source.kind, surface.source.path)}</div>
+                    <h4>{surface.key}</h4>
+                    <p>{surface.sha1} · {formatBytes(surface.bytes)}</p>
+                  </div>
+                  <span className="harness-summary-meta">展开查看内容</span>
+                </summary>
+                <pre className="code-block">{surface.content}</pre>
+              </details>
+            ))}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  );
+}
+
 function SettingsWorkspace(props: {
   apiBase: string;
   agentPromptAppend: string;
@@ -3123,7 +4396,7 @@ function SettingsWorkspace(props: {
         <label className="field">
           <span>API Base URL</span>
           <input onChange={(event) => onApiBaseChange(event.target.value)} placeholder="http://localhost:8080" value={apiBase} />
-          <small>建议填写完整协议和端口，例如 http://localhost:8080。</small>
+          <small>建议填写完整协议和端口，例如 http://localhost:8080。该项仅保存在当前浏览器，不会同步给其他用户。</small>
         </label>
         <label className="field">
           <span>品牌标题</span>
@@ -3138,7 +4411,7 @@ function SettingsWorkspace(props: {
         <label className="field">
           <span>默认用户 ID</span>
           <input onChange={(event) => onMemoryUserIdChange(event.target.value)} placeholder={DEFAULT_MEMORY_USER_ID} value={memoryUserId} />
-          <small>记忆对话和私有 skills 共用这个 user_id；留空时会回退到默认值 {DEFAULT_MEMORY_USER_ID}。</small>
+          <small>记忆对话和私有 skills 共用这个 user_id；留空时会回退到默认值 {DEFAULT_MEMORY_USER_ID}。该项仅保存在当前浏览器，避免多人共用同一记忆身份。</small>
         </label>
         <label className="field">
           <span>MCP 配置文件路径</span>
@@ -3283,7 +4556,7 @@ function SettingsWorkspace(props: {
           <article className="stat-card">
             <div className="soft-chip">Storage</div>
             <h3>LocalStorage</h3>
-            <p>设置、聊天记录和 skills 草稿都保存在当前浏览器。</p>
+            <p>API Base、默认用户 ID、聊天记录和 skills 草稿保存在当前浏览器；其余共享设置会持久化到服务端并在其他用户打开界面时生效。</p>
           </article>
         </div>
         <div className="empty-block">如果你把前端部署到独立域名，目标后端需要允许对应的 CORS 来源；否则浏览器会阻止跨域请求。</div>

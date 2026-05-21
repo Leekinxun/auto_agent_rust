@@ -1324,7 +1324,8 @@ button {
 
 .stats-grid,
 .settings-grid,
-.skills-grid {
+.skills-grid,
+.harness-grid {
     display: grid;
     gap: 18px;
 }
@@ -1359,6 +1360,10 @@ button {
 
 .settings-grid {
     grid-template-columns: 1.3fr 1fr;
+}
+
+.harness-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .settings-card {
@@ -1524,6 +1529,170 @@ button {
     gap: 16px;
 }
 
+.harness-card {
+    min-width: 0;
+}
+
+.harness-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.harness-item-card {
+    padding: 16px 18px;
+    border-radius: 18px;
+    background: rgba(24, 32, 27, 0.04);
+    border: 1px solid rgba(24, 32, 27, 0.06);
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.harness-item-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+}
+
+.harness-inline-actions {
+    justify-content: flex-end;
+}
+
+.harness-item-head h4,
+.harness-summary h4 {
+    margin: 10px 0 8px;
+    font-size: 16px;
+}
+
+.harness-item-head p,
+.harness-summary p,
+.harness-rich-block p {
+    margin: 0;
+    color: var(--muted);
+    line-height: 1.6;
+}
+
+.harness-summary {
+    list-style: none;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    cursor: pointer;
+}
+
+.harness-summary::-webkit-details-marker {
+    display: none;
+}
+
+.harness-summary-meta {
+    color: var(--muted);
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+.harness-rich-block {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.harness-rich-block strong,
+.harness-bullet-grid strong {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.harness-textarea {
+    min-height: 220px;
+    font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
+}
+
+.harness-note-textarea {
+    min-height: 120px;
+}
+
+.harness-approval-grid {
+    display: grid;
+    grid-template-columns: minmax(220px, 0.8fr) minmax(0, 1.2fr);
+    gap: 14px;
+}
+
+.preview-stat-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: right;
+}
+
+.harness-diff-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.harness-diff-pane {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.harness-diff-pane strong {
+    font-size: 12px;
+    color: var(--muted);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.harness-bullet-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px;
+}
+
+.harness-bullet-grid ul {
+    margin: 10px 0 0;
+    padding-left: 18px;
+    color: var(--text);
+}
+
+.harness-bullet-grid li {
+    margin-bottom: 8px;
+    line-height: 1.55;
+}
+
+.empty-inline {
+    color: var(--muted);
+    font-size: 13px;
+    margin-top: 10px;
+}
+
+.code-block {
+    margin: 0;
+    padding: 16px;
+    border-radius: 16px;
+    background: #172019;
+    color: #edf4ef;
+    overflow: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+    line-height: 1.6;
+    font-size: 13px;
+    font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", monospace;
+}
+
+.code-block-light {
+    background: #f6faf7;
+    color: var(--text);
+    border: 1px solid rgba(24, 32, 27, 0.08);
+}
+
 .mcp-preview-list {
     display: flex;
     flex-direction: column;
@@ -1620,6 +1789,28 @@ button {
 .soft-chip-error {
     color: #8d2f2f;
     background: rgba(157, 63, 63, 0.12);
+}
+
+.severity-high,
+.status-rejected {
+    color: #8d2f2f;
+    background: rgba(157, 63, 63, 0.12);
+}
+
+.severity-medium {
+    color: #8f5b00;
+    background: rgba(156, 107, 17, 0.12);
+}
+
+.severity-low,
+.status-proposed {
+    color: #145534;
+    background: rgba(31, 122, 77, 0.12);
+}
+
+.status-accepted {
+    color: #0d5f3a;
+    background: rgba(31, 122, 77, 0.18);
 }
 
 .empty-block.compact {
@@ -1779,7 +1970,11 @@ button {
 
     .settings-grid,
     .skills-grid,
-    .stats-grid {
+    .harness-grid,
+    .stats-grid,
+    .harness-bullet-grid,
+    .harness-diff-grid,
+    .harness-approval-grid {
         grid-template-columns: 1fr;
     }
 
@@ -1787,6 +1982,15 @@ button {
     .skills-meta-grid,
     .preview-metadata {
         grid-template-columns: 1fr;
+    }
+
+    .harness-item-head,
+    .harness-summary {
+        flex-direction: column;
+    }
+
+    .preview-stat-row {
+        text-align: left;
     }
 }
 

@@ -1,4 +1,4 @@
-export type ViewId = "stream" | "memoryStream" | "skills" | "settings";
+export type ViewId = "stream" | "memoryStream" | "harness" | "skills" | "settings";
 export type ChatModeId = "stream" | "memoryStream";
 export type ToastTone = "info" | "success" | "error";
 export type SkillScope = "shared" | "private" | "effective";
@@ -180,4 +180,224 @@ export type McpServerPreview = {
   ok: boolean;
   error?: string;
   tools: McpToolPreview[];
+};
+
+export type PromptSourceKind = "builtin" | "file" | "request" | "none";
+
+export type PromptSource = {
+  kind: PromptSourceKind;
+  path?: string | null;
+};
+
+export type HarnessSnapshotSurface = {
+  key: string;
+  source: PromptSource;
+  sha1: string;
+  bytes: number;
+  content: string;
+};
+
+export type HarnessSnapshot = {
+  snapshotId: string;
+  generatedAtMs: number;
+  memoryOnlySelfEvolution: boolean;
+  surfaces: HarnessSnapshotSurface[];
+};
+
+export type HarnessToolSignal = {
+  name: string;
+  count: number;
+};
+
+export type HarnessCandidateSignal = {
+  key: string;
+  severity: string;
+  summary: string;
+  traceIds: string[];
+};
+
+export type HarnessSignalSummary = {
+  inspectedTraces: number;
+  memoryTraces: number;
+  statelessTraces: number;
+  successTraces: number;
+  errorTraces: number;
+  finalReplyRecoveredTraces: number;
+  maxIterationsTraces: number;
+  selfEvolutionExecutedTraces: number;
+  avgIterations: number;
+  avgToolCalls: number;
+  topTools: HarnessToolSignal[];
+  candidateSignals: HarnessCandidateSignal[];
+  recentTraceIds: string[];
+  memoryOnlySelfEvolution: boolean;
+};
+
+export type HarnessTraceRequest = {
+  sessionId?: string | null;
+  userIdPresent: boolean;
+  historyItems: number;
+  uploadedFiles: number;
+  memorySnapshotInjected: boolean;
+  selfEvolutionAllowed: boolean;
+  resolvedModelId: string;
+  resolvedMaxIterations: number;
+  temperature?: number | null;
+  topP?: number | null;
+  mcpBaseUrls: number;
+  mcpDisabledUrls: number;
+  mcpLazyUrls: number;
+};
+
+export type HarnessTracePrompts = {
+  topLevelSystem: PromptSource;
+  systemAppend: PromptSource;
+  finalAnswerRecovery: PromptSource;
+  subagentShared: PromptSource;
+  subagentExplore: PromptSource;
+  subagentGeneral: PromptSource;
+  memoryMaintenanceSystem: PromptSource;
+  memoryMaintenanceUserTemplate: PromptSource;
+  skillLearningSystem: PromptSource;
+  skillLearningUserTemplate: PromptSource;
+};
+
+export type HarnessTraceOutcome = {
+  status: string;
+  finishReason: string;
+  error?: string | null;
+  iterations: number;
+  toolCalls: number;
+  toolNames: string[];
+  replyChars: number;
+  outputFiles: number;
+  outputFileNames: string[];
+  usedSkillNames: string[];
+  skillsUpdated: number;
+  finalReplyRecovered: boolean;
+  selfEvolutionExecuted: boolean;
+};
+
+export type HarnessRunTrace = {
+  traceId: string;
+  harnessSnapshotId: string;
+  startedAtMs: number;
+  finishedAtMs: number;
+  runKind: string;
+  mode: string;
+  request: HarnessTraceRequest;
+  prompts: HarnessTracePrompts;
+  outcome: HarnessTraceOutcome;
+};
+
+export type HarnessDecisionStatus = "proposed" | "accepted" | "rejected";
+
+export type HarnessDecisionRecord = {
+  decisionId: string;
+  createdAtMs: number;
+  title: string;
+  summary: string;
+  rationale: string;
+  expectedImpact: string[];
+  changedSurfaces: string[];
+  validationPlan: string[];
+  modeScope: string;
+  status: HarnessDecisionStatus;
+  relatedTraceIds: string[];
+  snapshotBeforeId?: string | null;
+  snapshotAfterId?: string | null;
+};
+
+export type HarnessDecisionDraft = {
+  draftId: string;
+  signalKey: string;
+  severity: string;
+  title: string;
+  summary: string;
+  rationale: string;
+  expectedImpact: string[];
+  changedSurfaces: string[];
+  validationPlan: string[];
+  modeScope: string;
+  recommendedStatus: HarnessDecisionStatus;
+  relatedTraceIds: string[];
+  snapshotBeforeId?: string | null;
+};
+
+export type HarnessApprovalStatus = "approved" | "reverted";
+
+export type HarnessApprovalChange = {
+  surfaceKey: string;
+  path: string;
+  changed: boolean;
+  beforeSha1: string;
+  afterSha1: string;
+  beforeBytes: number;
+  afterBytes: number;
+  byteDelta: number;
+  beforeLines: number;
+  afterLines: number;
+  lineDelta: number;
+  beforeContent: string;
+  afterContent: string;
+};
+
+export type HarnessApprovalRecord = {
+  approvalId: string;
+  createdAtMs: number;
+  decisionId?: string | null;
+  title: string;
+  summary: string;
+  approvedBy: string;
+  approvalNote?: string | null;
+  modeScope: string;
+  relatedTraceIds: string[];
+  snapshotBeforeId: string;
+  snapshotAfterId: string;
+  changedSurfaces: HarnessApprovalChange[];
+  runtimeReloaded: boolean;
+  status: HarnessApprovalStatus;
+  revertedFromApprovalId?: string | null;
+};
+
+export type HarnessApplyPreviewSurface = {
+  surfaceKey: string;
+  path: string;
+  changed: boolean;
+  beforeSha1: string;
+  afterSha1: string;
+  beforeBytes: number;
+  afterBytes: number;
+  byteDelta: number;
+  beforeLines: number;
+  afterLines: number;
+  lineDelta: number;
+  beforeContent: string;
+  afterContent: string;
+};
+
+export type HarnessApplyPreview = {
+  snapshotBefore: HarnessSnapshot;
+  expectedSnapshotId?: string | null;
+  changedSurfaceCount: number;
+  surfaces: HarnessApplyPreviewSurface[];
+};
+
+export type SharedFrontendSettings = {
+  brandTitle: string;
+  brandSubtitle: string;
+  mcpConfigPath: string;
+  mcpBaseUrls: string;
+  mcpDisabledUrls: string[];
+  mcpLazyUrls: string[];
+  agentPromptAppend: string;
+  modelId: string;
+  temperature: string;
+  maxTokens: string;
+  maxIterations: string;
+  topP: string;
+  memoryMaintenanceSystemPrompt: string;
+  memoryMaintenanceUserPrompt: string;
+  skillLearningSystemPrompt: string;
+  skillLearningUserPrompt: string;
 };
