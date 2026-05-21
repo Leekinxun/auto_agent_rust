@@ -91,6 +91,107 @@ docker run -d \
   - `/chat/memory-run`
   目前仅保留为重定向兼容入口，不再作为独立页面模式。
 
+## AHE / Harness Engineering（自进化 Harness）
+
+当前仓库已经加入一套 **repo-native、人工可控、可审计、可回滚** 的 AHE-lite（Agentic Harness Engineering）能力，用来观察并逐步改进 agent 的 harness，而不是在运行时做黑盒自动变异。
+
+### Harness 目录
+
+以下 surface 以文件形式保存在仓库根目录 `harness/` 下：
+
+- `harness/system/base.md`
+- `harness/subagents/shared.md`
+- `harness/subagents/explore.md`
+- `harness/subagents/general-purpose.md`
+- `harness/middleware/final-answer-recovery.md`
+- `harness/middleware/messages.json`
+- `harness/memory/*.md`
+- `harness/skills/*.md`
+- `harness/tools/descriptions.json`
+
+这些文件会覆盖或补充运行时 prompt / tool 描述，使 harness 的调整可以通过 Git 管理、审阅、回滚与复现。
+
+### 前端观察入口
+
+前端新增 `Harness 观测` 页面：
+
+- 路径：`/harness`
+- 可查看：
+  - snapshot（当前生效 surfaces）
+  - signals（近期 trace 聚合信号）
+  - traces（每次 run / stream 的结构化观测）
+  - decision drafts / decisions
+  - approvals（审批记录）
+
+### 人工演进流程
+
+当前 Harness 变更默认走 **人工审阅链路**：
+
+1. 根据 recent traces 生成 draft
+2. 人工保存为 decision
+3. 在前端编辑目标 surface 内容
+4. 生成 preview diff
+5. 填写审批人 / 审批备注
+6. 手动 apply 并热更新运行时
+7. 如有必要，可按 approval 记录执行 rollback
+
+这条链路的目标是：**先观察，再预览，再审批，再写入**。
+
+### 关键约束：无痕模式不自进化
+
+这是当前实现中的硬约束：
+
+- `stateless / 无痕`：**不允许自进化**
+- `memory / 记忆`：允许受控的 self-evolution 相关流程
+
+也就是说，AHE 的观测与人工 apply 能力可以在前端看到，但 **无痕模式不会自动修改 harness**。
+
+### 数据落盘位置
+
+Harness 相关运行记录保存在 `.omx/` 下：
+
+- traces：`.omx/traces/harness/*.json`
+- decisions：`.omx/decisions/harness/*.json`
+- approvals：`.omx/approvals/harness/*.json`
+- 共享前端设置：`.omx/state/frontend-settings.json`
+
+### 主要接口
+
+- `GET /agent/harness/snapshot`
+- `GET /agent/harness/signals`
+- `GET /agent/harness/traces`
+- `GET /agent/harness/drafts`
+- `GET /agent/harness/decisions`
+- `GET /agent/harness/approvals`
+- `POST /agent/harness/preview-apply`
+- `POST /agent/harness/apply`
+- `POST /agent/harness/rollback`
+
+### 设置页共享策略
+
+设置页现在分为两类：
+
+#### 共享并持久化到服务端
+
+这些设置会写入 `.omx/state/frontend-settings.json`，其他用户打开前端时也会自动生效：
+
+- 品牌标题 / 副标题
+- MCP 相关共享配置
+- agent prompt append
+- model / temperature / top_p / max_tokens / max_iterations
+- memory / skill 维护 prompt override
+
+#### 仅当前浏览器本地保存
+
+以下设置仍保存在浏览器 `localStorage`，不会同步给其他用户：
+
+- API Base URL
+- 默认用户 ID
+- 聊天记录
+- skills 草稿编辑状态
+
+这样可以避免多人共用同一个后端入口或同一个记忆身份。
+
 ## 当前迁移状态
 
 - 已完成：
