@@ -70,6 +70,7 @@ describe("frontend chat surface", () => {
         mcpBaseUrls: "http://mcp-a.example/mcp\nhttp://mcp-b.example/mcp",
         mcpDisabledUrls: ["http://mcp-b.example/mcp"],
         mcpLazyUrls: ["http://mcp-a.example/mcp"],
+        agentPromptOverride: "base override",
         agentPromptAppend: "extra prompt",
         modelId: "demo-model",
         temperature: "0.2",
@@ -88,6 +89,7 @@ describe("frontend chat surface", () => {
     expect(formData.get("mcp_base_urls")).toBe("[\"http://mcp-a.example/mcp\",\"http://mcp-b.example/mcp\"]");
     expect(formData.get("mcp_disabled_urls")).toBe("[\"http://mcp-b.example/mcp\"]");
     expect(formData.get("mcp_lazy_urls")).toBe("[\"http://mcp-a.example/mcp\"]");
+    expect(formData.get("system_override")).toBe("base override");
     expect(formData.get("system_append")).toBe("extra prompt");
     expect(formData.get("memory_maintenance_system")).toBe("memory sys");
     expect(formData.get("skill_learning_user_template")).toBe("skill user");
@@ -152,6 +154,28 @@ describe("frontend chat surface", () => {
           { name: "tool_a", description: "desc a" },
           { name: "tool_b", description: "" }
         ],
+        error: undefined
+      }
+    ]);
+  });
+
+  it("keeps disabled MCP servers visible in preview payloads", () => {
+    expect(normalizeMcpPreviewServers([
+      {
+        endpoint: "http://disabled/mcp",
+        mode: "disabled",
+        ok: true,
+        tool_count: 1,
+        tools: [{ name: "hidden_tool", description: "still previewable" }]
+      }
+    ])).toEqual([
+      {
+        endpoint: "http://disabled/mcp",
+        endpointKey: "http://disabled/mcp",
+        mode: "disabled",
+        ok: true,
+        toolCount: 1,
+        tools: [{ name: "hidden_tool", description: "still previewable" }],
         error: undefined
       }
     ]);

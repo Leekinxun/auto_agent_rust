@@ -7,7 +7,9 @@ import type {
   ChatState,
   DisplayMessage,
   HarnessApplyPreview,
+  HarnessApprovalStatus,
   HarnessApprovalRecord,
+  HarnessDecisionStatus,
   HarnessDecisionDraft,
   HarnessDecisionRecord,
   HarnessRunTrace,
@@ -144,6 +146,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   mcpBaseUrls: "",
   mcpDisabledUrls: [],
   mcpLazyUrls: [],
+  agentPromptOverride: "",
   agentPromptAppend: "",
   modelId: "",
   temperature: "",
@@ -477,6 +480,7 @@ function buildSharedFrontendSettings(settings: AppSettings): SharedFrontendSetti
     mcpBaseUrls: settings.mcpBaseUrls,
     mcpDisabledUrls: settings.mcpDisabledUrls,
     mcpLazyUrls: settings.mcpLazyUrls,
+    agentPromptOverride: settings.agentPromptOverride,
     agentPromptAppend: settings.agentPromptAppend,
     modelId: settings.modelId,
     temperature: settings.temperature,
@@ -501,6 +505,7 @@ function applySharedFrontendSettings(current: AppSettings, shared: SharedFronten
     mcpLazyUrls: normalizeMcpUrlList(
       shared.mcpLazyUrls.filter((item) => !normalizeMcpUrlList(shared.mcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
     ),
+    agentPromptOverride: shared.agentPromptOverride,
     agentPromptAppend: shared.agentPromptAppend,
     modelId: shared.modelId,
     temperature: shared.temperature,
@@ -540,6 +545,7 @@ function loadSettings(): AppSettings {
       mcpLazyUrls: Array.isArray(parsed.mcpLazyUrls)
         ? normalizeMcpUrlList(parsed.mcpLazyUrls.filter((item): item is string => typeof item === "string"))
         : DEFAULT_SETTINGS.mcpLazyUrls,
+      agentPromptOverride: typeof parsed.agentPromptOverride === "string" ? parsed.agentPromptOverride : DEFAULT_SETTINGS.agentPromptOverride,
       agentPromptAppend: typeof parsed.agentPromptAppend === "string" ? parsed.agentPromptAppend : DEFAULT_SETTINGS.agentPromptAppend,
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
       temperature: typeof parsed.temperature === "string" ? parsed.temperature : DEFAULT_SETTINGS.temperature,
@@ -673,6 +679,7 @@ export default function App() {
   const [draftMcpBaseUrls, setDraftMcpBaseUrls] = useState(settings.mcpBaseUrls);
   const [draftMcpDisabledUrls, setDraftMcpDisabledUrls] = useState<string[]>(settings.mcpDisabledUrls);
   const [draftMcpLazyUrls, setDraftMcpLazyUrls] = useState<string[]>(settings.mcpLazyUrls);
+  const [draftAgentPromptOverride, setDraftAgentPromptOverride] = useState(settings.agentPromptOverride);
   const [draftAgentPromptAppend, setDraftAgentPromptAppend] = useState(settings.agentPromptAppend);
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
   const [draftTemperature, setDraftTemperature] = useState(settings.temperature);
@@ -737,6 +744,7 @@ export default function App() {
     setDraftMcpBaseUrls(settings.mcpBaseUrls);
     setDraftMcpDisabledUrls(settings.mcpDisabledUrls);
     setDraftMcpLazyUrls(settings.mcpLazyUrls);
+    setDraftAgentPromptOverride(settings.agentPromptOverride);
     setDraftAgentPromptAppend(settings.agentPromptAppend);
     setDraftModelId(settings.modelId);
     setDraftTemperature(settings.temperature);
@@ -1031,6 +1039,7 @@ export default function App() {
         mcp_base_urls: settingsToPersist.mcpBaseUrls,
         mcp_disabled_urls: settingsToPersist.mcpDisabledUrls,
         mcp_lazy_urls: settingsToPersist.mcpLazyUrls,
+        agent_prompt_override: settingsToPersist.agentPromptOverride,
         agent_prompt_append: settingsToPersist.agentPromptAppend,
         model_id: settingsToPersist.modelId,
         temperature: settingsToPersist.temperature,
@@ -2198,6 +2207,7 @@ export default function App() {
                 element={
                   <SettingsWorkspace
                     apiBase={draftApiBase}
+                    agentPromptOverride={draftAgentPromptOverride}
                     agentPromptAppend={draftAgentPromptAppend}
                     brandTitle={draftBrandTitle}
                     brandSubtitle={draftBrandSubtitle}
@@ -2219,6 +2229,7 @@ export default function App() {
                     temperature={draftTemperature}
                     topP={draftTopP}
                     onApiBaseChange={setDraftApiBase}
+                    onAgentPromptOverrideChange={setDraftAgentPromptOverride}
                     onAgentPromptAppendChange={setDraftAgentPromptAppend}
                     onMaxIterationsChange={setDraftMaxIterations}
                     onMaxTokensChange={setDraftMaxTokens}
@@ -2267,6 +2278,7 @@ export default function App() {
                       setDraftMcpBaseUrls(DEFAULT_SETTINGS.mcpBaseUrls);
                       setDraftMcpDisabledUrls(DEFAULT_SETTINGS.mcpDisabledUrls);
                       setDraftMcpLazyUrls(DEFAULT_SETTINGS.mcpLazyUrls);
+                      setDraftAgentPromptOverride(DEFAULT_SETTINGS.agentPromptOverride);
                       setDraftAgentPromptAppend(DEFAULT_SETTINGS.agentPromptAppend);
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
                       setDraftTemperature(DEFAULT_SETTINGS.temperature);
@@ -2293,6 +2305,7 @@ export default function App() {
                             mcpLazyUrls: normalizeMcpUrlList(
                               draftMcpLazyUrls.filter((item) => !normalizeMcpUrlList(draftMcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
                             ),
+                            agentPromptOverride: draftAgentPromptOverride.trim(),
                             agentPromptAppend: draftAgentPromptAppend.trim(),
                             modelId: draftModelId.trim(),
                             temperature: normalizeOptionalNumericSetting(draftTemperature, "Temperature", "float", 0, 2),
@@ -3083,6 +3096,39 @@ function UserIdBadge(props: {
   );
 }
 
+function ExpandableInlineValue(props: {
+  value: string;
+  tone?: "light" | "dark";
+  maxLength?: number;
+  title?: string;
+}) {
+  const { maxLength = 24, title, tone = "light", value } = props;
+  const [expanded, setExpanded] = useState(false);
+  const trimmed = value.trim();
+  const expandable = trimmed.length > maxLength;
+  const displayValue = expanded || !expandable
+    ? trimmed
+    : `${trimmed.slice(0, 8)}...${trimmed.slice(-8)}`;
+
+  return (
+    <button
+      aria-expanded={expandable ? expanded : undefined}
+      className={`user-id-badge user-id-badge-${tone} ${expanded ? "expanded" : ""}`}
+      disabled={!expandable}
+      onClick={() => {
+        if (expandable) {
+          setExpanded((current) => !current);
+        }
+      }}
+      title={title || trimmed}
+      type="button"
+    >
+      <span className="user-id-badge-value">{displayValue}</span>
+      {expandable ? <span className="user-id-badge-toggle">{expanded ? "收起" : "展开"}</span> : null}
+    </button>
+  );
+}
+
 function SkillsWorkspace(props: {
   items: SkillItem[];
   scope: SkillScope;
@@ -3425,6 +3471,32 @@ function describePromptSource(kind: string, path?: string | null) {
   return "none";
 }
 
+function describePromptSourceKind(kind: string) {
+  if (kind === "file") {
+    return "file";
+  }
+  if (kind === "request") {
+    return "request override";
+  }
+  if (kind === "builtin") {
+    return "builtin";
+  }
+  return "none";
+}
+
+function getPromptSourceChipClass(kind: string) {
+  switch (kind) {
+    case "file":
+      return "source-file";
+    case "request":
+      return "source-request";
+    case "builtin":
+      return "source-builtin";
+    default:
+      return "source-none";
+  }
+}
+
 function describeDecisionStatus(status: string) {
   switch (status) {
     case "accepted":
@@ -3436,8 +3508,32 @@ function describeDecisionStatus(status: string) {
   }
 }
 
+function describeApprovalStatus(status: string) {
+  return status === "reverted" ? "已回滚" : "已批准";
+}
+
 function describeModeScope(scope: string) {
   return scope === "memory_only" ? "仅记忆模式" : "全部模式";
+}
+
+function getTraceStatusLabel(trace: HarnessRunTrace) {
+  if (trace.outcome.status === "error") {
+    return "错误";
+  }
+  if (trace.outcome.finalReplyRecovered) {
+    return "恢复回答";
+  }
+  return "成功";
+}
+
+function getTraceStatusClass(trace: HarnessRunTrace) {
+  if (trace.outcome.status === "error") {
+    return "status-rejected";
+  }
+  if (trace.outcome.finalReplyRecovered) {
+    return "status-recovered";
+  }
+  return "status-accepted";
 }
 
 type HarnessApplyEditorState = {
@@ -3582,6 +3678,45 @@ function HarnessWorkspace(props: {
   const [applySubmitting, setApplySubmitting] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [traceFilter, setTraceFilter] = useState<"all" | "success" | "error" | "recovered">("all");
+  const [traceQuery, setTraceQuery] = useState("");
+  const [decisionFilter, setDecisionFilter] = useState<"all" | HarnessDecisionStatus>("all");
+  const [approvalFilter, setApprovalFilter] = useState<"all" | HarnessApprovalStatus>("all");
+
+  const normalizedTraceQuery = traceQuery.trim().toLowerCase();
+  const filteredTraces = traces.filter((trace) => {
+    if (traceFilter === "error" && trace.outcome.status !== "error") {
+      return false;
+    }
+    if (traceFilter === "success" && (trace.outcome.status !== "success" || trace.outcome.finalReplyRecovered)) {
+      return false;
+    }
+    if (traceFilter === "recovered" && !trace.outcome.finalReplyRecovered) {
+      return false;
+    }
+    if (!normalizedTraceQuery) {
+      return true;
+    }
+    const haystack = [
+      trace.traceId,
+      trace.harnessSnapshotId,
+      trace.request.resolvedModelId,
+      trace.outcome.finishReason,
+      trace.mode,
+      trace.runKind,
+      trace.outcome.toolNames.join(" ")
+    ]
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(normalizedTraceQuery);
+  });
+
+  const filteredDecisions = decisions.filter((decision) =>
+    decisionFilter === "all" ? true : decision.status === decisionFilter
+  );
+  const filteredApprovals = approvals.filter((approval) =>
+    approvalFilter === "all" ? true : approval.status === approvalFilter
+  );
 
   const openDraftApplyEditor = (draft: HarnessDecisionDraft) => {
     setPreviewError("");
@@ -3747,7 +3882,7 @@ function HarnessWorkspace(props: {
               </div>
               <div className="preview-meta-item">
                 <strong>Snapshot Before</strong>
-                <span>{snapshot?.snapshotId || applyEditor.snapshotBeforeId || "—"}</span>
+                <ExpandableInlineValue value={snapshot?.snapshotId || applyEditor.snapshotBeforeId || "—"} />
               </div>
               <div className="preview-meta-item">
                 <strong>Mode Scope</strong>
@@ -3902,7 +4037,7 @@ function HarnessWorkspace(props: {
                   </div>
                   <div className="preview-meta-item">
                     <strong>Snapshot Before</strong>
-                    <span>{draft.snapshotBeforeId || "—"}</span>
+                    <ExpandableInlineValue value={draft.snapshotBeforeId || "—"} />
                   </div>
                 </div>
                 <div className="harness-rich-block">
@@ -4000,15 +4135,27 @@ function HarnessWorkspace(props: {
             <h3>Approval Records</h3>
             <span>每次真正写入 harness 后都会形成一条审批记录，包含审批人、快照前后、以及每个 surface 的差异摘要。</span>
           </div>
+          <div className="button-row">
+            {(["all", "approved", "reverted"] as const).map((status) => (
+              <button
+                className={`button ${approvalFilter === status ? "secondary" : "ghost"}`}
+                key={status}
+                onClick={() => setApprovalFilter(status)}
+                type="button"
+              >
+                {status === "all" ? "全部" : status === "approved" ? "已批准" : "已回滚"}
+              </button>
+            ))}
+          </div>
         </div>
-        {!approvals.length ? <div className="empty-block">当前还没有 approval 记录。</div> : null}
-        {approvals.length ? (
+        {!filteredApprovals.length ? <div className="empty-block">当前筛选条件下没有 approval 记录。</div> : null}
+        {filteredApprovals.length ? (
           <div className="harness-stack">
-            {approvals.map((approval) => (
+            {filteredApprovals.map((approval) => (
               <details className="harness-item-card" key={approval.approvalId}>
                 <summary className="harness-summary">
                   <div>
-                    <div className="soft-chip status-accepted">{approval.status.toUpperCase()}</div>
+                    <div className={`soft-chip ${approval.status === "reverted" ? "status-rejected" : "status-accepted"}`}>{describeApprovalStatus(approval.status)}</div>
                     <h4>{approval.title}</h4>
                     <p>{approval.summary}</p>
                   </div>
@@ -4017,19 +4164,19 @@ function HarnessWorkspace(props: {
                 <div className="preview-metadata">
                   <div className="preview-meta-item">
                     <strong>Approved By</strong>
-                    <span>{approval.approvedBy}</span>
+                    <ExpandableInlineValue value={approval.approvedBy} />
                   </div>
                   <div className="preview-meta-item">
                     <strong>Decision</strong>
-                    <span>{approval.decisionId || "—"}</span>
+                    <ExpandableInlineValue value={approval.decisionId || "—"} />
                   </div>
                   <div className="preview-meta-item">
                     <strong>Snapshot Before</strong>
-                    <span>{approval.snapshotBeforeId}</span>
+                    <ExpandableInlineValue value={approval.snapshotBeforeId} />
                   </div>
                   <div className="preview-meta-item">
                     <strong>Snapshot After</strong>
-                    <span>{approval.snapshotAfterId}</span>
+                    <ExpandableInlineValue value={approval.snapshotAfterId} />
                   </div>
                 </div>
                 {approval.approvalNote ? (
@@ -4108,11 +4255,23 @@ function HarnessWorkspace(props: {
             <h3>Decision Records</h3>
             <span>已保存的结构化记录，便于回溯某次 harness 调整为什么发生、作用面在哪里、如何验证。</span>
           </div>
+          <div className="button-row">
+            {(["all", "proposed", "accepted", "rejected"] as const).map((status) => (
+              <button
+                className={`button ${decisionFilter === status ? "secondary" : "ghost"}`}
+                key={status}
+                onClick={() => setDecisionFilter(status)}
+                type="button"
+              >
+                {status === "all" ? "全部" : describeDecisionStatus(status)}
+              </button>
+            ))}
+          </div>
         </div>
-        {!decisions.length ? <div className="empty-block">当前还没有 decision 记录。</div> : null}
-        {decisions.length ? (
+        {!filteredDecisions.length ? <div className="empty-block">当前筛选条件下没有 decision 记录。</div> : null}
+        {filteredDecisions.length ? (
           <div className="harness-stack">
-            {decisions.map((decision) => (
+            {filteredDecisions.map((decision) => (
               <details className="harness-item-card" key={decision.decisionId}>
                 <summary className="harness-summary">
                   <div>
@@ -4161,15 +4320,41 @@ function HarnessWorkspace(props: {
             <h3>Recent Traces</h3>
             <span>每次 run / stream 的结构化观测，包含 snapshot id、finish reason、tool 序列以及是否触发 self-evolution。</span>
           </div>
+          <div className="button-row">
+            {(["all", "success", "recovered", "error"] as const).map((status) => (
+              <button
+                className={`button ${traceFilter === status ? "secondary" : "ghost"}`}
+                key={status}
+                onClick={() => setTraceFilter(status)}
+                type="button"
+              >
+                {status === "all" ? "全部" : status === "success" ? "成功" : status === "recovered" ? "恢复回答" : "错误"}
+              </button>
+            ))}
+          </div>
         </div>
-        {!traces.length ? <div className="empty-block">当前还没有 harness traces。</div> : null}
-        {traces.length ? (
+        <div className="harness-toolbar">
+          <label className="field harness-search-field">
+            <span>Trace 搜索</span>
+            <input
+              onChange={(event) => setTraceQuery(event.target.value)}
+              placeholder="按 trace id / snapshot / model / tool 搜索"
+              value={traceQuery}
+            />
+          </label>
+          <div className="harness-toolbar-meta">显示 {filteredTraces.length} / {traces.length} 条 traces</div>
+        </div>
+        {!filteredTraces.length ? <div className="empty-block">当前筛选条件下没有 harness traces。</div> : null}
+        {filteredTraces.length ? (
           <div className="harness-stack">
-            {traces.map((trace) => (
+            {filteredTraces.map((trace) => (
               <details className="harness-item-card" key={trace.traceId}>
                 <summary className="harness-summary">
                   <div>
-                    <div className="soft-chip">{trace.mode} · {trace.runKind}</div>
+                    <div className="harness-chip-row">
+                      <div className={`soft-chip ${getTraceStatusClass(trace)}`}>{getTraceStatusLabel(trace)}</div>
+                      <div className="soft-chip">{trace.mode} · {trace.runKind}</div>
+                    </div>
                     <h4>{trace.traceId}</h4>
                     <p>{trace.outcome.status} · {trace.outcome.finishReason} · tools {trace.outcome.toolCalls} · iterations {trace.outcome.iterations}</p>
                   </div>
@@ -4178,11 +4363,11 @@ function HarnessWorkspace(props: {
                 <div className="preview-metadata">
                   <div className="preview-meta-item">
                     <strong>Snapshot</strong>
-                    <span>{trace.harnessSnapshotId}</span>
+                    <ExpandableInlineValue value={trace.harnessSnapshotId} />
                   </div>
                   <div className="preview-meta-item">
                     <strong>Model</strong>
-                    <span>{trace.request.resolvedModelId}</span>
+                    <ExpandableInlineValue value={trace.request.resolvedModelId} />
                   </div>
                   <div className="preview-meta-item">
                     <strong>Self-Evolution</strong>
@@ -4200,13 +4385,28 @@ function HarnessWorkspace(props: {
                   </div>
                   <div>
                     <strong>Prompt Sources</strong>
-                    <ul>
-                      <li>system: {describePromptSource(trace.prompts.topLevelSystem.kind, trace.prompts.topLevelSystem.path)}</li>
-                      <li>subagent shared: {describePromptSource(trace.prompts.subagentShared.kind, trace.prompts.subagentShared.path)}</li>
-                      <li>subagent explore: {describePromptSource(trace.prompts.subagentExplore.kind, trace.prompts.subagentExplore.path)}</li>
-                      <li>subagent general: {describePromptSource(trace.prompts.subagentGeneral.kind, trace.prompts.subagentGeneral.path)}</li>
-                      <li>recovery: {describePromptSource(trace.prompts.finalAnswerRecovery.kind, trace.prompts.finalAnswerRecovery.path)}</li>
-                    </ul>
+                    <div className="source-chip-grid">
+                      <div className="source-chip-item">
+                        <span className={`soft-chip ${getPromptSourceChipClass(trace.prompts.topLevelSystem.kind)}`}>system · {describePromptSourceKind(trace.prompts.topLevelSystem.kind)}</span>
+                        <small>{describePromptSource(trace.prompts.topLevelSystem.kind, trace.prompts.topLevelSystem.path)}</small>
+                      </div>
+                      <div className="source-chip-item">
+                        <span className={`soft-chip ${getPromptSourceChipClass(trace.prompts.subagentShared.kind)}`}>shared · {describePromptSourceKind(trace.prompts.subagentShared.kind)}</span>
+                        <small>{describePromptSource(trace.prompts.subagentShared.kind, trace.prompts.subagentShared.path)}</small>
+                      </div>
+                      <div className="source-chip-item">
+                        <span className={`soft-chip ${getPromptSourceChipClass(trace.prompts.subagentExplore.kind)}`}>explore · {describePromptSourceKind(trace.prompts.subagentExplore.kind)}</span>
+                        <small>{describePromptSource(trace.prompts.subagentExplore.kind, trace.prompts.subagentExplore.path)}</small>
+                      </div>
+                      <div className="source-chip-item">
+                        <span className={`soft-chip ${getPromptSourceChipClass(trace.prompts.subagentGeneral.kind)}`}>general · {describePromptSourceKind(trace.prompts.subagentGeneral.kind)}</span>
+                        <small>{describePromptSource(trace.prompts.subagentGeneral.kind, trace.prompts.subagentGeneral.path)}</small>
+                      </div>
+                      <div className="source-chip-item">
+                        <span className={`soft-chip ${getPromptSourceChipClass(trace.prompts.finalAnswerRecovery.kind)}`}>recovery · {describePromptSourceKind(trace.prompts.finalAnswerRecovery.kind)}</span>
+                        <small>{describePromptSource(trace.prompts.finalAnswerRecovery.kind, trace.prompts.finalAnswerRecovery.path)}</small>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </details>
@@ -4247,6 +4447,7 @@ function HarnessWorkspace(props: {
 
 function SettingsWorkspace(props: {
   apiBase: string;
+  agentPromptOverride: string;
   agentPromptAppend: string;
   brandTitle: string;
   brandSubtitle: string;
@@ -4268,6 +4469,7 @@ function SettingsWorkspace(props: {
   skillLearningSystemPrompt: string;
   skillLearningUserPrompt: string;
   onApiBaseChange: (value: string) => void;
+  onAgentPromptOverrideChange: (value: string) => void;
   onAgentPromptAppendChange: (value: string) => void;
   onBrandTitleChange: (value: string) => void;
   onBrandSubtitleChange: (value: string) => void;
@@ -4298,6 +4500,7 @@ function SettingsWorkspace(props: {
 }) {
   const {
     apiBase,
+    agentPromptOverride,
     agentPromptAppend,
     brandTitle,
     brandSubtitle,
@@ -4319,6 +4522,7 @@ function SettingsWorkspace(props: {
     temperature,
     topP,
     onApiBaseChange,
+    onAgentPromptOverrideChange,
     onAgentPromptAppendChange,
     onMaxIterationsChange,
     onMaxTokensChange,
@@ -4346,6 +4550,7 @@ function SettingsWorkspace(props: {
 
   const [toolSearch, setToolSearch] = useState("");
   const [collapsedServers, setCollapsedServers] = useState<Record<string, boolean>>({});
+  const [compactToolDescriptions, setCompactToolDescriptions] = useState(true);
   const normalizedSearch = toolSearch.trim().toLowerCase();
   const visibleServers = mcpPreview.servers
     .map((server) => {
@@ -4357,7 +4562,7 @@ function SettingsWorkspace(props: {
         : server.tools;
       return { ...server, tools, toolCount: server.toolCount };
     })
-    .filter((server) => normalizedSearch ? server.tools.length > 0 || !server.ok : true);
+    .filter((server) => normalizedSearch ? server.tools.length > 0 || !server.ok || server.mode === "disabled" : true);
 
   const visibleToolCount = visibleServers.reduce((sum, server) => sum + server.tools.length, 0);
 
@@ -4427,8 +4632,18 @@ function SettingsWorkspace(props: {
           每个 MCP 都可以单独设置为立即加载 / 按需加载 / 禁用。按需加载的 MCP 默认不会把全部工具暴露给模型，模型需要先搜索再按需激活。
         </div>
         <label className="field">
+          <span>Agent 提示词覆盖项</span>
+          <textarea
+            className="prompt-textarea prompt-textarea-lg"
+            onChange={(event) => onAgentPromptOverrideChange(event.target.value)}
+            placeholder="完全覆盖主 agent 的基础 system prompt。适合你想自己接管整段系统提示词时使用。"
+            value={agentPromptOverride}
+          />
+          <small>留空时使用后端默认系统提示词；填写后会直接替换基础 system prompt，然后仍可继续叠加下方“追加项”。</small>
+        </label>
+        <label className="field">
           <span>Agent 提示词追加项</span>
-          <textarea onChange={(event) => onAgentPromptAppendChange(event.target.value)} placeholder="补充对主 agent 的长期指令，例如输出风格、回答约束、固定流程。" value={agentPromptAppend} />
+          <textarea className="prompt-textarea prompt-textarea-lg" onChange={(event) => onAgentPromptAppendChange(event.target.value)} placeholder="补充对主 agent 的长期指令，例如输出风格、回答约束、固定流程。" value={agentPromptAppend} />
           <small>这段内容会追加在后端默认系统提示词之后，不会覆盖现有默认规则。</small>
         </label>
         <div className="section-head">
@@ -4439,22 +4654,22 @@ function SettingsWorkspace(props: {
         </div>
         <label className="field">
           <span>USER.md / MEMORY.md 维护 System Prompt</span>
-          <textarea onChange={(event) => onMemoryMaintenanceSystemPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 system prompt" value={memoryMaintenanceSystemPrompt} />
+          <textarea className="prompt-textarea" onChange={(event) => onMemoryMaintenanceSystemPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 system prompt" value={memoryMaintenanceSystemPrompt} />
           <small>建议只写行为约束，不要在这里塞当前会话内容。</small>
         </label>
         <label className="field">
           <span>USER.md / MEMORY.md 维护 User Prompt 模板</span>
-          <textarea onChange={(event) => onMemoryMaintenanceUserPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 user prompt 模板" value={memoryMaintenanceUserPrompt} />
+          <textarea className="prompt-textarea" onChange={(event) => onMemoryMaintenanceUserPromptChange(event.target.value)} placeholder="覆盖写入 USER.md / MEMORY.md 时使用的 user prompt 模板" value={memoryMaintenanceUserPrompt} />
           <small>支持占位符：{"{user_limit}"}、{"{memory_limit}"}、{"{user_restructure}"}、{"{memory_restructure}"}、{"{user_md_path}"}、{"{memory_md_path}"}、{"{current_user_len}"}、{"{current_memory_len}"}、{"{user_message}"}、{"{assistant_reply}"}。</small>
         </label>
         <label className="field">
           <span>私有 Skills 学习 System Prompt</span>
-          <textarea onChange={(event) => onSkillLearningSystemPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 system prompt" value={skillLearningSystemPrompt} />
+          <textarea className="prompt-textarea" onChange={(event) => onSkillLearningSystemPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 system prompt" value={skillLearningSystemPrompt} />
           <small>用于约束 skill 学习方式，例如保守更新、强调结构稳定等。</small>
         </label>
         <label className="field">
           <span>私有 Skills 学习 User Prompt 模板</span>
-          <textarea onChange={(event) => onSkillLearningUserPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 user prompt 模板" value={skillLearningUserPrompt} />
+          <textarea className="prompt-textarea" onChange={(event) => onSkillLearningUserPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 user prompt 模板" value={skillLearningUserPrompt} />
           <small>支持占位符：{"{source_scope}"}、{"{skill_path}"}、{"{skill_name}"}、{"{skill_body_len}"}、{"{user_message}"}、{"{assistant_reply}"}。</small>
         </label>
         <div className="section-head">
@@ -4539,6 +4754,11 @@ function SettingsWorkspace(props: {
             <p>Temp {temperature || "默认"} · Max {maxTokens || "默认"} · Iter {maxIterations || "默认"} · Top P {topP || "默认"}</p>
           </article>
           <article className="stat-card">
+            <div className="soft-chip">Prompt Override</div>
+            <h3>{agentPromptOverride.trim() ? "已配置" : "未配置"}</h3>
+            <p>{agentPromptOverride.trim() ? "会替换主 agent 的基础 system prompt" : "当前使用后端默认基础 system prompt"}</p>
+          </article>
+          <article className="stat-card">
             <div className="soft-chip">Prompt Addendum</div>
             <h3>{agentPromptAppend.trim() ? "已配置" : "未配置"}</h3>
             <p>{agentPromptAppend.trim() ? "会追加到默认系统提示词后面" : "当前仅使用后端默认系统提示词"}</p>
@@ -4569,6 +4789,13 @@ function SettingsWorkspace(props: {
             <span>可直接查看当前解析出的 MCP 服务列表、连接结果和工具清单。</span>
           </div>
           <div className="button-row">
+            <button
+              className="button ghost"
+              onClick={() => setCompactToolDescriptions((current) => !current)}
+              type="button"
+            >
+              {compactToolDescriptions ? "多行描述" : "单行描述"}
+            </button>
             <button
               className="button ghost"
               onClick={() => setCollapsedServers(
@@ -4669,7 +4896,7 @@ function SettingsWorkspace(props: {
                   {!collapsed && server.tools.length ? (
                     <div className="mcp-tool-list">
                       {server.tools.map((tool) => (
-                        <div className="mcp-tool-item" key={`${server.endpoint}-${tool.name}`}>
+                        <div className={`mcp-tool-item ${compactToolDescriptions ? "compact" : ""}`} key={`${server.endpoint}-${tool.name}`}>
                           <strong>{tool.name}</strong>
                           <span>{tool.description || "无描述"}</span>
                         </div>
@@ -4701,11 +4928,11 @@ function SettingsWorkspace(props: {
           <div className="form-grid">
             <label className="field">
               <span>无痕流式默认提示词</span>
-              <textarea readOnly value={promptPreview.statelessPrompt} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.statelessPrompt} />
             </label>
             <label className="field">
               <span>记忆流式默认提示词</span>
-              <textarea readOnly value={promptPreview.memoryPrompt} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.memoryPrompt} />
             </label>
           </div>
         ) : null}
@@ -4724,19 +4951,19 @@ function SettingsWorkspace(props: {
           <div className="form-grid">
             <label className="field">
               <span>Memory 维护 System Prompt</span>
-              <textarea readOnly value={promptPreview.memoryMaintenanceSystem} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.memoryMaintenanceSystem} />
             </label>
             <label className="field">
               <span>Memory 维护 User Prompt 模板</span>
-              <textarea readOnly value={promptPreview.memoryMaintenanceUserTemplate} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.memoryMaintenanceUserTemplate} />
             </label>
             <label className="field">
               <span>Skill 学习 System Prompt</span>
-              <textarea readOnly value={promptPreview.skillLearningSystem} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.skillLearningSystem} />
             </label>
             <label className="field">
               <span>Skill 学习 User Prompt 模板</span>
-              <textarea readOnly value={promptPreview.skillLearningUserTemplate} />
+              <textarea className="prompt-textarea prompt-textarea-xl" readOnly value={promptPreview.skillLearningUserTemplate} />
             </label>
           </div>
         ) : null}

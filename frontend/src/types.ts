@@ -99,6 +99,7 @@ export type AppSettings = {
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
   mcpLazyUrls: string[];
+  agentPromptOverride: string;
   agentPromptAppend: string;
   modelId: string;
   temperature: string;
@@ -390,6 +391,7 @@ export type SharedFrontendSettings = {
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
   mcpLazyUrls: string[];
+  agentPromptOverride: string;
   agentPromptAppend: string;
   modelId: string;
   temperature: string;

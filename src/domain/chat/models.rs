@@ -101,6 +101,7 @@ pub struct ChatRequest {
     pub message: String,
     pub history: Vec<HistoryEntry>,
     pub system: Option<String>,
+    pub system_override: Option<String>,
     pub system_append: Option<String>,
     pub session_id: Option<String>,
     pub user_id: Option<String>,

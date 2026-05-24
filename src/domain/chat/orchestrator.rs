@@ -775,7 +775,8 @@ impl ChatOrchestrator {
             .map(|session_id| self.session_service.get_or_create(session_id))
             .transpose()?;
         let mut base_system = request
-            .system
+            .system_override
+            .or(request.system)
             .unwrap_or_else(|| self.build_system(request.user_id.as_deref()));
         base_system = append_system_instruction(base_system, request.system_append.as_deref());
 
@@ -1893,7 +1894,7 @@ fn build_trace_prompts(
     _mode: &ChatMode,
 ) -> HarnessTracePrompts {
     HarnessTracePrompts {
-        top_level_system: if request.system.is_some() {
+        top_level_system: if request.system_override.is_some() || request.system.is_some() {
             PromptSource::request()
         } else {
             harness.system_base_source().clone()
@@ -2364,6 +2365,16 @@ mod tests {
         assert!(prompt.contains("base prompt"));
         assert!(prompt.contains("<custom_agent_instruction>"));
         assert!(prompt.contains("Always summarize risks first."));
+    }
+
+    #[test]
+    fn system_override_takes_precedence_over_default_base_prompt() {
+        let prompt = append_system_instruction(
+            "override prompt".to_string(),
+            Some("appendix"),
+        );
+        assert!(prompt.starts_with("override prompt"));
+        assert!(prompt.contains("appendix"));
     }
 
     #[test]

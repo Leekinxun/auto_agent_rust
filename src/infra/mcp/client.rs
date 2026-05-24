@@ -179,7 +179,7 @@ impl McpClient {
         &self,
         overrides: Option<&McpOverrides>,
     ) -> Result<Vec<McpServerPreview>> {
-        let endpoints = self.endpoint_clients(overrides)?;
+        let endpoints = self.preview_endpoint_clients(overrides)?;
         if endpoints.is_empty() {
             return Ok(Vec::new());
         }
@@ -310,6 +310,24 @@ impl McpClient {
 
     fn endpoint_clients(&self, overrides: Option<&McpOverrides>) -> Result<Vec<McpEndpointClient>> {
         let base_urls = resolve_effective_base_urls(&self.config, overrides)?;
+        base_urls
+            .into_iter()
+            .map(|base_url| {
+                Ok(McpEndpointClient {
+                    http: self.http.clone(),
+                    base_url,
+                    session_id: Arc::new(Mutex::new(None)),
+                    init_lock: Arc::new(Mutex::new(())),
+                })
+            })
+            .collect()
+    }
+
+    fn preview_endpoint_clients(
+        &self,
+        overrides: Option<&McpOverrides>,
+    ) -> Result<Vec<McpEndpointClient>> {
+        let base_urls = resolve_preview_base_urls(&self.config, overrides)?;
         base_urls
             .into_iter()
             .map(|base_url| {
@@ -511,6 +529,34 @@ fn resolve_effective_base_urls(
     config: &McpClientConfig,
     overrides: Option<&McpOverrides>,
 ) -> Result<Vec<String>> {
+    let mut urls = collect_candidate_base_urls(config, overrides)?;
+
+    if let Some(overrides) = overrides
+        && !overrides.disabled_urls.is_empty()
+    {
+        let disabled = overrides
+            .disabled_urls
+            .iter()
+            .map(|item| item.trim().trim_end_matches('/').to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<HashSet<_>>();
+        urls.retain(|url| !disabled.contains(url));
+    }
+
+    Ok(urls)
+}
+
+fn resolve_preview_base_urls(
+    config: &McpClientConfig,
+    overrides: Option<&McpOverrides>,
+) -> Result<Vec<String>> {
+    collect_candidate_base_urls(config, overrides)
+}
+
+fn collect_candidate_base_urls(
+    config: &McpClientConfig,
+    overrides: Option<&McpOverrides>,
+) -> Result<Vec<String>> {
     let mut urls = config.base_urls.clone();
 
     if let Some(overrides) = overrides {
@@ -527,20 +573,7 @@ fn resolve_effective_base_urls(
         urls.extend(load_mcp_urls_from_path(config.config_path.trim())?);
     }
 
-    let mut urls = unique_non_empty(urls);
-    if let Some(overrides) = overrides
-        && !overrides.disabled_urls.is_empty()
-    {
-        let disabled = overrides
-            .disabled_urls
-            .iter()
-            .map(|item| item.trim().trim_end_matches('/').to_string())
-            .filter(|item| !item.is_empty())
-            .collect::<HashSet<_>>();
-        urls.retain(|url| !disabled.contains(url));
-    }
-
-    Ok(urls)
+    Ok(unique_non_empty(urls))
 }
 
 fn load_mcp_urls_from_path(path: &str) -> Result<Vec<String>> {
@@ -756,7 +789,7 @@ fn parse_response_body(body: &str) -> Result<Value> {
 mod tests {
     use super::{
         McpClient, McpOverrides, build_tool_schema, configured_base_urls, extract_mcp_urls,
-        parse_response_body, resolve_effective_base_urls,
+        parse_response_body, resolve_effective_base_urls, resolve_preview_base_urls,
     };
     use crate::config::model::{AppConfig, McpServerConfig};
     use axum::Router;
@@ -853,6 +886,35 @@ mod tests {
         assert_eq!(
             resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
             vec!["http://one.example/mcp"]
+        );
+    }
+
+    #[test]
+    fn keeps_disabled_urls_in_preview_set() {
+        let config = super::McpClientConfig {
+            config_path: String::new(),
+            base_urls: vec![
+                "http://one.example/mcp".to_string(),
+                "http://two.example/mcp/".to_string(),
+            ],
+        };
+        let overrides = McpOverrides {
+            config_path: None,
+            base_urls: vec!["http://three.example/mcp".to_string()],
+            disabled_urls: vec![
+                "http://two.example/mcp".to_string(),
+                "http://three.example/mcp/".to_string(),
+            ],
+            lazy_urls: Vec::new(),
+        };
+
+        assert_eq!(
+            resolve_preview_base_urls(&config, Some(&overrides)).unwrap(),
+            vec![
+                "http://one.example/mcp",
+                "http://two.example/mcp",
+                "http://three.example/mcp"
+            ]
         );
     }
 

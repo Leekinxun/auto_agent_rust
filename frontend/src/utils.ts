@@ -613,6 +613,7 @@ export function normalizeSharedFrontendSettings(value: unknown): SharedFrontendS
     mcpLazyUrls: Array.isArray(value.mcp_lazy_urls)
       ? value.mcp_lazy_urls.filter((item): item is string => typeof item === "string")
       : [],
+    agentPromptOverride: typeof value.agent_prompt_override === "string" ? value.agent_prompt_override : "",
     agentPromptAppend: typeof value.agent_prompt_append === "string" ? value.agent_prompt_append : "",
     modelId: typeof value.model_id === "string" ? value.model_id : "",
     temperature: typeof value.temperature === "string" ? value.temperature : "",
@@ -762,6 +763,7 @@ export function buildFormData(
   if (settings.mcpLazyUrls.length) {
     formData.append("mcp_lazy_urls", JSON.stringify(settings.mcpLazyUrls.map((item) => normalizeMcpEndpoint(item)).filter(Boolean)));
   }
+  appendOptionalFormData(formData, "system_override", settings.agentPromptOverride);
   appendOptionalFormData(formData, "system_append", settings.agentPromptAppend);
   appendOptionalFormData(formData, "model_id", settings.modelId);
   appendOptionalFormData(formData, "temperature", settings.temperature);

@@ -16,6 +16,7 @@ pub struct SharedFrontendSettings {
     pub mcp_base_urls: String,
     pub mcp_disabled_urls: Vec<String>,
     pub mcp_lazy_urls: Vec<String>,
+    pub agent_prompt_override: String,
     pub agent_prompt_append: String,
     pub model_id: String,
     pub temperature: String,
@@ -37,6 +38,7 @@ impl Default for SharedFrontendSettings {
             mcp_base_urls: String::new(),
             mcp_disabled_urls: Vec::new(),
             mcp_lazy_urls: Vec::new(),
+            agent_prompt_override: String::new(),
             agent_prompt_append: String::new(),
             model_id: String::new(),
             temperature: String::new(),
@@ -99,6 +101,7 @@ impl SharedFrontendSettings {
                 .into_iter()
                 .filter(|item| !normalize_list(&self.mcp_disabled_urls).contains(item))
                 .collect(),
+            agent_prompt_override: self.agent_prompt_override.trim().to_string(),
             agent_prompt_append: self.agent_prompt_append.trim().to_string(),
             model_id: self.model_id.trim().to_string(),
             temperature: self.temperature.trim().to_string(),
@@ -182,6 +185,7 @@ mod tests {
             mcp_base_urls: "http://demo/mcp".to_string(),
             mcp_disabled_urls: vec!["http://a".to_string(), "http://a".to_string()],
             mcp_lazy_urls: vec!["http://b".to_string(), "http://a".to_string()],
+            agent_prompt_override: " override base ".to_string(),
             agent_prompt_append: " be concise ".to_string(),
             model_id: "demo-model".to_string(),
             temperature: "0.2".to_string(),
@@ -203,6 +207,7 @@ mod tests {
         assert_eq!(loaded.mcp_config_path, "config/mcp.json");
         assert_eq!(loaded.mcp_disabled_urls, vec!["http://a"]);
         assert_eq!(loaded.mcp_lazy_urls, vec!["http://b"]);
+        assert_eq!(loaded.agent_prompt_override, "override base");
         assert_eq!(loaded.agent_prompt_append, "be concise");
     }
 }

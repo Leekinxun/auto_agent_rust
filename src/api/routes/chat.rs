@@ -271,6 +271,7 @@ async fn parse_chat_multipart(
     let mut message: Option<String> = None;
     let mut history_json = String::from("[]");
     let mut system: Option<String> = None;
+    let mut system_override: Option<String> = None;
     let mut system_append: Option<String> = None;
     let mut session_id: Option<String> = None;
     let mut user_id: Option<String> = None;
@@ -302,6 +303,7 @@ async fn parse_chat_multipart(
             "message" => message = Some(value),
             "history" => history_json = value,
             "system" => system = non_empty(value),
+            "system_override" => system_override = non_empty(value),
             "system_append" => system_append = non_empty(value),
             "session_id" => session_id = non_empty(value),
             "user_id" => user_id = non_empty(value),
@@ -360,7 +362,8 @@ async fn parse_chat_multipart(
     Ok(ChatRequest {
         message,
         history,
-        system,
+        system: system.or(system_override.clone()),
+        system_override,
         system_append,
         session_id,
         user_id: user_id.or(agent_id),

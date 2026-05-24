@@ -1349,6 +1349,7 @@ button {
     font-size: 18px;
     letter-spacing: -0.02em;
     font-weight: 800;
+    word-break: break-word;
 }
 
 .stat-card p,
@@ -1392,6 +1393,20 @@ button {
 
 .field textarea {
     resize: vertical;
+}
+
+.prompt-textarea {
+    resize: both;
+    min-height: 180px;
+    line-height: 1.6;
+}
+
+.prompt-textarea-lg {
+    min-height: 220px;
+}
+
+.prompt-textarea-xl {
+    min-height: 360px;
 }
 
 .field input[disabled] {
@@ -1554,6 +1569,7 @@ button {
     justify-content: space-between;
     align-items: flex-start;
     gap: 16px;
+    flex-wrap: wrap;
 }
 
 .harness-inline-actions {
@@ -1581,6 +1597,7 @@ button {
     align-items: flex-start;
     gap: 16px;
     cursor: pointer;
+    flex-wrap: wrap;
 }
 
 .harness-summary::-webkit-details-marker {
@@ -1590,7 +1607,8 @@ button {
 .harness-summary-meta {
     color: var(--muted);
     font-size: 12px;
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-word;
 }
 
 .harness-rich-block {
@@ -1629,6 +1647,9 @@ button {
     color: var(--muted);
     font-size: 12px;
     text-align: right;
+    flex: 1 1 220px;
+    min-width: 0;
+    word-break: break-word;
 }
 
 .harness-diff-grid {
@@ -1714,6 +1735,7 @@ button {
     justify-content: space-between;
     gap: 12px;
     align-items: flex-start;
+    flex-wrap: wrap;
 }
 
 .mcp-toolbar {
@@ -1758,6 +1780,7 @@ button {
 .mcp-preview-head p {
     margin: 0;
     font-size: 13px;
+    word-break: break-word;
 }
 
 .mcp-tool-list {
@@ -1776,14 +1799,26 @@ button {
     border: 1px solid rgba(24, 32, 27, 0.06);
 }
 
+.mcp-tool-item.compact {
+    gap: 2px;
+}
+
 .mcp-tool-item strong {
     font-size: 13px;
+    word-break: break-all;
 }
 
 .mcp-tool-item span {
     font-size: 13px;
     color: var(--muted);
     line-height: 1.5;
+    word-break: break-word;
+}
+
+.mcp-tool-item.compact span {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
 .soft-chip-error {
@@ -1827,6 +1862,71 @@ button {
     display: flex;
     flex-direction: column;
     gap: 6px;
+}
+
+.harness-toolbar {
+    display: flex;
+    gap: 12px;
+    align-items: end;
+    justify-content: space-between;
+    flex-wrap: wrap;
+}
+
+.harness-search-field {
+    flex: 1 1 320px;
+    margin: 0;
+}
+
+.harness-toolbar-meta {
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.harness-chip-row {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+.status-recovered,
+.source-request {
+    color: #8f5b00;
+    background: rgba(156, 107, 17, 0.12);
+}
+
+.source-file {
+    color: #145534;
+    background: rgba(31, 122, 77, 0.12);
+}
+
+.source-builtin {
+    color: #215a78;
+    background: rgba(33, 90, 120, 0.12);
+}
+
+.source-none {
+    color: var(--muted);
+    background: rgba(24, 32, 27, 0.08);
+}
+
+.source-chip-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.source-chip-item {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.source-chip-item small {
+    color: var(--muted);
+    line-height: 1.5;
+    word-break: break-word;
 }
 
 .preview-markdown {
