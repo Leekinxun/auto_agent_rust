@@ -67,6 +67,8 @@ pub struct McpOverrides {
     pub base_urls: Vec<String>,
     pub disabled_urls: Vec<String>,
     pub lazy_urls: Vec<String>,
+    pub allowed_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
 }
 
 impl McpOverrides {
@@ -109,6 +111,7 @@ pub struct ChatRequest {
     pub llm_overrides: LlmOverrides,
     pub prompt_overrides: AgentPromptOverrides,
     pub mcp_overrides: McpOverrides,
+    pub skill_permissions: SkillPermissions,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,6 +148,12 @@ pub struct McpServerPreviewDto {
 pub struct McpToolPreviewDto {
     pub name: String,
     pub description: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SkillPermissions {
+    pub allowed_skills: Vec<String>,
+    pub denied_skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

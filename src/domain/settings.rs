@@ -16,6 +16,8 @@ pub struct SharedFrontendSettings {
     pub mcp_base_urls: String,
     pub mcp_disabled_urls: Vec<String>,
     pub mcp_lazy_urls: Vec<String>,
+    pub mcp_user_permissions: Vec<UserMcpPermissions>,
+    pub skill_user_permissions: Vec<UserSkillPermissions>,
     pub agent_prompt_override: String,
     pub agent_prompt_append: String,
     pub model_id: String,
@@ -29,6 +31,22 @@ pub struct SharedFrontendSettings {
     pub skill_learning_user_prompt: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct UserMcpPermissions {
+    pub user_id: String,
+    pub allowed_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct UserSkillPermissions {
+    pub user_id: String,
+    pub allowed_skills: Vec<String>,
+    pub denied_skills: Vec<String>,
+}
+
 impl Default for SharedFrontendSettings {
     fn default() -> Self {
         Self {
@@ -38,6 +56,8 @@ impl Default for SharedFrontendSettings {
             mcp_base_urls: String::new(),
             mcp_disabled_urls: Vec::new(),
             mcp_lazy_urls: Vec::new(),
+            mcp_user_permissions: Vec::new(),
+            skill_user_permissions: Vec::new(),
             agent_prompt_override: String::new(),
             agent_prompt_append: String::new(),
             model_id: String::new(),
@@ -101,6 +121,8 @@ impl SharedFrontendSettings {
                 .into_iter()
                 .filter(|item| !normalize_list(&self.mcp_disabled_urls).contains(item))
                 .collect(),
+            mcp_user_permissions: normalize_mcp_permissions(&self.mcp_user_permissions),
+            skill_user_permissions: normalize_skill_permissions(&self.skill_user_permissions),
             agent_prompt_override: self.agent_prompt_override.trim().to_string(),
             agent_prompt_append: self.agent_prompt_append.trim().to_string(),
             model_id: self.model_id.trim().to_string(),
@@ -117,6 +139,50 @@ impl SharedFrontendSettings {
             skill_learning_user_prompt: self.skill_learning_user_prompt.trim().to_string(),
         }
     }
+}
+
+fn normalize_mcp_permissions(values: &[UserMcpPermissions]) -> Vec<UserMcpPermissions> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let user_id = value.user_id.trim();
+            if user_id.is_empty() {
+                return None;
+            }
+            let allowed_tools = normalize_list(&value.allowed_tools);
+            let denied_tools = normalize_list(&value.denied_tools);
+            if allowed_tools.is_empty() && denied_tools.is_empty() {
+                return None;
+            }
+            Some(UserMcpPermissions {
+                user_id: user_id.to_string(),
+                allowed_tools,
+                denied_tools,
+            })
+        })
+        .collect()
+}
+
+fn normalize_skill_permissions(values: &[UserSkillPermissions]) -> Vec<UserSkillPermissions> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let user_id = value.user_id.trim();
+            if user_id.is_empty() {
+                return None;
+            }
+            let allowed_skills = normalize_list(&value.allowed_skills);
+            let denied_skills = normalize_list(&value.denied_skills);
+            if allowed_skills.is_empty() && denied_skills.is_empty() {
+                return None;
+            }
+            Some(UserSkillPermissions {
+                user_id: user_id.to_string(),
+                allowed_skills,
+                denied_skills,
+            })
+        })
+        .collect()
 }
 
 fn normalize_non_empty(value: &str, fallback: &str) -> String {
@@ -185,6 +251,16 @@ mod tests {
             mcp_base_urls: "http://demo/mcp".to_string(),
             mcp_disabled_urls: vec!["http://a".to_string(), "http://a".to_string()],
             mcp_lazy_urls: vec!["http://b".to_string(), "http://a".to_string()],
+            mcp_user_permissions: vec![super::UserMcpPermissions {
+                user_id: "user-1".to_string(),
+                allowed_tools: vec!["read_file".to_string()],
+                denied_tools: vec!["delete_file".to_string()],
+            }],
+            skill_user_permissions: vec![super::UserSkillPermissions {
+                user_id: "user-1".to_string(),
+                allowed_skills: vec!["read_document".to_string()],
+                denied_skills: vec!["get_oil_data".to_string()],
+            }],
             agent_prompt_override: " override base ".to_string(),
             agent_prompt_append: " be concise ".to_string(),
             model_id: "demo-model".to_string(),
@@ -209,5 +285,13 @@ mod tests {
         assert_eq!(loaded.mcp_lazy_urls, vec!["http://b"]);
         assert_eq!(loaded.agent_prompt_override, "override base");
         assert_eq!(loaded.agent_prompt_append, "be concise");
+        assert_eq!(
+            loaded.mcp_user_permissions[0].allowed_tools,
+            vec!["read_file"]
+        );
+        assert_eq!(
+            loaded.skill_user_permissions[0].denied_skills,
+            vec!["get_oil_data"]
+        );
     }
 }

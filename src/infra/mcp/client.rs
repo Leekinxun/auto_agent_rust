@@ -133,7 +133,16 @@ impl McpClient {
                             &schema.full_name,
                             overrides,
                             selection,
-                        ) {
+                        ) || !overrides
+                            .map(|value| {
+                                mcp_tool_allowed(
+                                    &schema.full_name,
+                                    &value.allowed_tools,
+                                    &value.denied_tools,
+                                )
+                            })
+                            .unwrap_or(true)
+                        {
                             continue;
                         }
                         if seen.insert(schema.full_name.clone()) {
@@ -191,6 +200,22 @@ impl McpClient {
                     let tools = raw_tools
                         .into_iter()
                         .filter_map(|tool| build_tool_preview(&tool))
+                        .filter(|tool| {
+                            overrides
+                                .map(|value| {
+                                    let full_name = format!(
+                                        "mcp_{}__{}",
+                                        endpoint_key(&endpoint.base_url),
+                                        tool.name
+                                    );
+                                    mcp_tool_allowed_any(
+                                        &[&tool.name, &full_name],
+                                        &value.allowed_tools,
+                                        &value.denied_tools,
+                                    )
+                                })
+                                .unwrap_or(true)
+                        })
                         .collect::<Vec<_>>();
                     previews.push(McpServerPreview {
                         endpoint: endpoint.base_url.clone(),
@@ -243,6 +268,14 @@ impl McpClient {
                 let Some(preview) = build_tool_preview(&tool) else {
                     continue;
                 };
+                let full_name = format!("mcp_{}__{}", endpoint_key, preview.name);
+                if !mcp_tool_allowed_any(
+                    &[&preview.name, &full_name],
+                    &overrides.allowed_tools,
+                    &overrides.denied_tools,
+                ) {
+                    continue;
+                }
                 let haystack = format!(
                     "{} {} {}",
                     endpoint.base_url, preview.name, preview.description
@@ -288,12 +321,36 @@ impl McpClient {
             if !should_expose_endpoint_tools(&endpoint.base_url, overrides, selection) {
                 bail!("MCP endpoint not activated for tool {tool_name}: {target_key}");
             }
+            if !overrides
+                .map(|value| {
+                    mcp_tool_allowed_any(
+                        &[&actual_name, tool_name],
+                        &value.allowed_tools,
+                        &value.denied_tools,
+                    )
+                })
+                .unwrap_or(true)
+            {
+                bail!("MCP tool not allowed for current user: {tool_name}");
+            }
             return endpoint.call_tool(&actual_name, arguments).await;
         }
 
         let mut last_error = None;
         for endpoint in endpoints {
             if !should_expose_endpoint_tools(&endpoint.base_url, overrides, selection) {
+                continue;
+            }
+            if !overrides
+                .map(|value| {
+                    mcp_tool_allowed_any(
+                        &[&actual_name, tool_name],
+                        &value.allowed_tools,
+                        &value.denied_tools,
+                    )
+                })
+                .unwrap_or(true)
+            {
                 continue;
             }
             match endpoint.call_tool(&actual_name, arguments.clone()).await {
@@ -588,6 +645,37 @@ fn load_mcp_urls_from_path(path: &str) -> Result<Vec<String>> {
     Ok(urls)
 }
 
+fn mcp_tool_allowed(tool_name: &str, allowed_tools: &[String], denied_tools: &[String]) -> bool {
+    mcp_tool_allowed_any(&[tool_name], allowed_tools, denied_tools)
+}
+
+fn mcp_tool_allowed_any(
+    tool_names: &[&str],
+    allowed_tools: &[String],
+    denied_tools: &[String],
+) -> bool {
+    let candidates = tool_names
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return false;
+    }
+    if denied_tools
+        .iter()
+        .map(|item| item.trim())
+        .any(|denied| candidates.iter().any(|candidate| candidate == &denied))
+    {
+        return false;
+    }
+    allowed_tools.is_empty()
+        || allowed_tools
+            .iter()
+            .map(|item| item.trim())
+            .any(|allowed| candidates.iter().any(|candidate| candidate == &allowed))
+}
+
 fn should_expose_endpoint_tools(
     endpoint: &str,
     overrides: Option<&McpOverrides>,
@@ -856,6 +944,8 @@ mod tests {
             base_urls: vec!["http://two.example/mcp".to_string()],
             disabled_urls: Vec::new(),
             lazy_urls: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
         };
 
         assert_eq!(
@@ -881,6 +971,8 @@ mod tests {
                 "http://three.example/mcp/".to_string(),
             ],
             lazy_urls: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
         };
 
         assert_eq!(
@@ -906,6 +998,8 @@ mod tests {
                 "http://three.example/mcp/".to_string(),
             ],
             lazy_urls: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
         };
 
         assert_eq!(

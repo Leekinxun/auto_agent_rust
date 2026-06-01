@@ -54,6 +54,9 @@ import {
   normalizeHarnessSnapshot,
   normalizeHarnessTraces,
   normalizeSharedFrontendSettings,
+  normalizeStringList,
+  normalizeUserMcpPermissions,
+  normalizeUserSkillPermissions,
   normalizeApiBase,
   normalizeMcpEndpoint,
   normalizeMcpPreviewServers,
@@ -146,6 +149,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   mcpBaseUrls: "",
   mcpDisabledUrls: [],
   mcpLazyUrls: [],
+  mcpUserPermissions: [],
+  skillUserPermissions: [],
   agentPromptOverride: "",
   agentPromptAppend: "",
   modelId: "",
@@ -223,13 +228,23 @@ function getMcpServerMode(endpoint: string, disabledUrls: string[], lazyUrls: st
   return "eager";
 }
 
-function buildMcpCacheKey(apiBase: string, configPath: string, rawBaseUrls: string, disabledUrls: string[], lazyUrls: string[]) {
+function buildMcpCacheKey(
+  apiBase: string,
+  configPath: string,
+  rawBaseUrls: string,
+  disabledUrls: string[],
+  lazyUrls: string[],
+  userPermissions: AppSettings["mcpUserPermissions"] = [],
+  userId = ""
+) {
   return JSON.stringify({
     apiBase: normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase),
     configPath: configPath.trim(),
     baseUrls: parseMcpBaseUrlsInput(rawBaseUrls),
     disabledUrls: normalizeMcpUrlList(disabledUrls).sort(),
-    lazyUrls: normalizeMcpUrlList(lazyUrls).sort()
+    lazyUrls: normalizeMcpUrlList(lazyUrls).sort(),
+    userId: userId.trim(),
+    userPermissions
   });
 }
 
@@ -480,6 +495,8 @@ function buildSharedFrontendSettings(settings: AppSettings): SharedFrontendSetti
     mcpBaseUrls: settings.mcpBaseUrls,
     mcpDisabledUrls: settings.mcpDisabledUrls,
     mcpLazyUrls: settings.mcpLazyUrls,
+    mcpUserPermissions: settings.mcpUserPermissions,
+    skillUserPermissions: settings.skillUserPermissions,
     agentPromptOverride: settings.agentPromptOverride,
     agentPromptAppend: settings.agentPromptAppend,
     modelId: settings.modelId,
@@ -505,6 +522,8 @@ function applySharedFrontendSettings(current: AppSettings, shared: SharedFronten
     mcpLazyUrls: normalizeMcpUrlList(
       shared.mcpLazyUrls.filter((item) => !normalizeMcpUrlList(shared.mcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
     ),
+    mcpUserPermissions: shared.mcpUserPermissions,
+    skillUserPermissions: shared.skillUserPermissions,
     agentPromptOverride: shared.agentPromptOverride,
     agentPromptAppend: shared.agentPromptAppend,
     modelId: shared.modelId,
@@ -545,6 +564,8 @@ function loadSettings(): AppSettings {
       mcpLazyUrls: Array.isArray(parsed.mcpLazyUrls)
         ? normalizeMcpUrlList(parsed.mcpLazyUrls.filter((item): item is string => typeof item === "string"))
         : DEFAULT_SETTINGS.mcpLazyUrls,
+      mcpUserPermissions: normalizeUserMcpPermissions(parsed.mcpUserPermissions),
+      skillUserPermissions: normalizeUserSkillPermissions(parsed.skillUserPermissions),
       agentPromptOverride: typeof parsed.agentPromptOverride === "string" ? parsed.agentPromptOverride : DEFAULT_SETTINGS.agentPromptOverride,
       agentPromptAppend: typeof parsed.agentPromptAppend === "string" ? parsed.agentPromptAppend : DEFAULT_SETTINGS.agentPromptAppend,
       modelId: typeof parsed.modelId === "string" ? parsed.modelId : DEFAULT_SETTINGS.modelId,
@@ -679,6 +700,8 @@ export default function App() {
   const [draftMcpBaseUrls, setDraftMcpBaseUrls] = useState(settings.mcpBaseUrls);
   const [draftMcpDisabledUrls, setDraftMcpDisabledUrls] = useState<string[]>(settings.mcpDisabledUrls);
   const [draftMcpLazyUrls, setDraftMcpLazyUrls] = useState<string[]>(settings.mcpLazyUrls);
+  const [draftMcpUserPermissions, setDraftMcpUserPermissions] = useState(settings.mcpUserPermissions);
+  const [draftSkillUserPermissions, setDraftSkillUserPermissions] = useState(settings.skillUserPermissions);
   const [draftAgentPromptOverride, setDraftAgentPromptOverride] = useState(settings.agentPromptOverride);
   const [draftAgentPromptAppend, setDraftAgentPromptAppend] = useState(settings.agentPromptAppend);
   const [draftModelId, setDraftModelId] = useState(settings.modelId);
@@ -744,6 +767,8 @@ export default function App() {
     setDraftMcpBaseUrls(settings.mcpBaseUrls);
     setDraftMcpDisabledUrls(settings.mcpDisabledUrls);
     setDraftMcpLazyUrls(settings.mcpLazyUrls);
+    setDraftMcpUserPermissions(settings.mcpUserPermissions);
+    setDraftSkillUserPermissions(settings.skillUserPermissions);
     setDraftAgentPromptOverride(settings.agentPromptOverride);
     setDraftAgentPromptAppend(settings.agentPromptAppend);
     setDraftModelId(settings.modelId);
@@ -895,7 +920,15 @@ export default function App() {
     let cancelled = false;
     setMcpPreview((current) => ({ ...current, loading: true, error: "" }));
 
-    void fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls)
+    void fetchMcpPreview(
+      draftApiBase,
+      draftMcpConfigPath,
+      draftMcpBaseUrls,
+      draftMcpDisabledUrls,
+      draftMcpLazyUrls,
+      draftMcpUserPermissions,
+      draftMemoryUserId
+    )
       .then((data) => {
         if (cancelled) {
           return;
@@ -920,13 +953,13 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls]);
+  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls, draftMcpUserPermissions, draftMemoryUserId]);
 
   useEffect(() => {
     if (currentView === "skills") {
       void loadSkills();
     }
-  }, [currentView, settings.apiBase, settings.memoryUserId, skillScope]);
+  }, [currentView, settings.apiBase, settings.memoryUserId, settings.skillUserPermissions, skillScope]);
 
   useEffect(() => {
     if (currentView !== "harness") {
@@ -984,7 +1017,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentView, settings.apiBase]);
+  }, [currentView, settings.apiBase, draftApiBase, draftMcpBaseUrls, draftMcpConfigPath, draftMcpDisabledUrls, draftMcpLazyUrls, draftMcpUserPermissions, draftMemoryUserId]);
 
   function showToast(message: string, tone: ToastItem["tone"]) {
     const id = createId("toast");
@@ -1039,6 +1072,16 @@ export default function App() {
         mcp_base_urls: settingsToPersist.mcpBaseUrls,
         mcp_disabled_urls: settingsToPersist.mcpDisabledUrls,
         mcp_lazy_urls: settingsToPersist.mcpLazyUrls,
+        mcp_user_permissions: settingsToPersist.mcpUserPermissions.map((item) => ({
+          user_id: item.userId,
+          allowed_tools: item.allowedTools,
+          denied_tools: item.deniedTools
+        })),
+        skill_user_permissions: settingsToPersist.skillUserPermissions.map((item) => ({
+          user_id: item.userId,
+          allowed_skills: item.allowedSkills,
+          denied_skills: item.deniedSkills
+        })),
         agent_prompt_override: settingsToPersist.agentPromptOverride,
         agent_prompt_append: settingsToPersist.agentPromptAppend,
         model_id: settingsToPersist.modelId,
@@ -1059,7 +1102,15 @@ export default function App() {
   }
 
   async function testMcpConnection() {
-    const data = await fetchMcpPreview(draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls);
+    const data = await fetchMcpPreview(
+      draftApiBase,
+      draftMcpConfigPath,
+      draftMcpBaseUrls,
+      draftMcpDisabledUrls,
+      draftMcpLazyUrls,
+      draftMcpUserPermissions,
+      draftMemoryUserId
+    );
     const servers = normalizeMcpPreviewServers(data.servers);
     const { okCount, totalServers, totalTools } = summarizeMcpServers(servers);
     setMcpPreview({
@@ -1117,6 +1168,13 @@ export default function App() {
     const params = new URLSearchParams({ scope });
     if (scope === "private") {
       params.set("user_id", skillUserId);
+    }
+    const permission = settings.skillUserPermissions.find((item) => item.userId === skillUserId);
+    if (permission?.allowedSkills.length) {
+      params.set("allowed_skills", JSON.stringify(permission.allowedSkills));
+    }
+    if (permission?.deniedSkills.length) {
+      params.set("denied_skills", JSON.stringify(permission.deniedSkills));
     }
     return `/agent/skills?${params.toString()}`;
   }
@@ -1459,7 +1517,9 @@ export default function App() {
       settings.mcpConfigPath,
       settings.mcpBaseUrls,
       settings.mcpDisabledUrls,
-      settings.mcpLazyUrls
+      settings.mcpLazyUrls,
+      settings.mcpUserPermissions,
+      settings.memoryUserId
     );
     const now = Date.now();
     const cached = mcpHealthCacheRef.current;
@@ -1474,7 +1534,9 @@ export default function App() {
         settings.mcpConfigPath,
         settings.mcpBaseUrls,
         settings.mcpDisabledUrls,
-        settings.mcpLazyUrls
+        settings.mcpLazyUrls,
+        settings.mcpUserPermissions,
+        settings.memoryUserId
       );
       const servers = normalizeMcpPreviewServers(data.servers);
       setMcpPreview({
@@ -2222,6 +2284,8 @@ export default function App() {
                     mcpBaseUrls={draftMcpBaseUrls}
                     mcpDisabledUrls={draftMcpDisabledUrls}
                     mcpLazyUrls={draftMcpLazyUrls}
+                    mcpUserPermissions={draftMcpUserPermissions}
+                    skillUserPermissions={draftSkillUserPermissions}
                     modelId={draftModelId}
                     promptPreview={promptPreview}
                     skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
@@ -2242,6 +2306,8 @@ export default function App() {
                     onMcpBaseUrlsChange={setDraftMcpBaseUrls}
                     onMcpDisabledUrlsChange={setDraftMcpDisabledUrls}
                     onMcpLazyUrlsChange={setDraftMcpLazyUrls}
+                    onMcpUserPermissionsChange={setDraftMcpUserPermissions}
+                    onSkillUserPermissionsChange={setDraftSkillUserPermissions}
                     onModelIdChange={setDraftModelId}
                     onCopyMcpServer={(server, mode) => {
                       void copyMcpServer(server, mode).catch((error) => {
@@ -2278,6 +2344,8 @@ export default function App() {
                       setDraftMcpBaseUrls(DEFAULT_SETTINGS.mcpBaseUrls);
                       setDraftMcpDisabledUrls(DEFAULT_SETTINGS.mcpDisabledUrls);
                       setDraftMcpLazyUrls(DEFAULT_SETTINGS.mcpLazyUrls);
+                      setDraftMcpUserPermissions(DEFAULT_SETTINGS.mcpUserPermissions);
+                      setDraftSkillUserPermissions(DEFAULT_SETTINGS.skillUserPermissions);
                       setDraftAgentPromptOverride(DEFAULT_SETTINGS.agentPromptOverride);
                       setDraftAgentPromptAppend(DEFAULT_SETTINGS.agentPromptAppend);
                       setDraftModelId(DEFAULT_SETTINGS.modelId);
@@ -2305,6 +2373,8 @@ export default function App() {
                             mcpLazyUrls: normalizeMcpUrlList(
                               draftMcpLazyUrls.filter((item) => !normalizeMcpUrlList(draftMcpDisabledUrls).includes(normalizeMcpEndpoint(item)))
                             ),
+                            mcpUserPermissions: normalizeUserMcpPermissions(draftMcpUserPermissions),
+                            skillUserPermissions: normalizeUserSkillPermissions(draftSkillUserPermissions),
                             agentPromptOverride: draftAgentPromptOverride.trim(),
                             agentPromptAppend: draftAgentPromptAppend.trim(),
                             modelId: draftModelId.trim(),
@@ -4458,6 +4528,8 @@ function SettingsWorkspace(props: {
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
   mcpLazyUrls: string[];
+  mcpUserPermissions: AppSettings["mcpUserPermissions"];
+  skillUserPermissions: AppSettings["skillUserPermissions"];
   modelId: string;
   promptPreview: PromptPreviewState;
   temperature: string;
@@ -4478,6 +4550,8 @@ function SettingsWorkspace(props: {
   onMcpBaseUrlsChange: (value: string) => void;
   onMcpDisabledUrlsChange: (value: string[]) => void;
   onMcpLazyUrlsChange: (value: string[]) => void;
+  onMcpUserPermissionsChange: (value: AppSettings["mcpUserPermissions"]) => void;
+  onSkillUserPermissionsChange: (value: AppSettings["skillUserPermissions"]) => void;
   onModelIdChange: (value: string) => void;
   onTestMcp: () => void;
   onTemperatureChange: (value: string) => void;
@@ -4515,6 +4589,8 @@ function SettingsWorkspace(props: {
     mcpBaseUrls,
     mcpDisabledUrls,
     mcpLazyUrls,
+    mcpUserPermissions,
+    skillUserPermissions,
     modelId,
     promptPreview,
     skillLearningSystemPrompt,
@@ -4535,6 +4611,8 @@ function SettingsWorkspace(props: {
     onMcpBaseUrlsChange,
     onMcpDisabledUrlsChange,
     onMcpLazyUrlsChange,
+    onMcpUserPermissionsChange,
+    onSkillUserPermissionsChange,
     onModelIdChange,
     onCopyMcpServer,
     onCopyVisibleMcpTools,
@@ -4565,6 +4643,54 @@ function SettingsWorkspace(props: {
     .filter((server) => normalizedSearch ? server.tools.length > 0 || !server.ok || server.mode === "disabled" : true);
 
   const visibleToolCount = visibleServers.reduce((sum, server) => sum + server.tools.length, 0);
+
+
+  const permissionListToText = (items: string[]) => items.join("\n");
+  const updateMcpPermission = (userId: string, field: "allowedTools" | "deniedTools", rawValue: string) => {
+    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+    const nextValues = normalizeStringList(rawValue.split(/\r?\n|,/));
+    const existing = mcpUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
+      userId: normalizedUserId,
+      allowedTools: [],
+      deniedTools: []
+    };
+    const next = {
+      ...existing,
+      [field]: nextValues
+    };
+    onMcpUserPermissionsChange(normalizeUserMcpPermissions([
+      ...mcpUserPermissions.filter((item) => item.userId !== normalizedUserId),
+      next
+    ]));
+  };
+  const updateSkillPermission = (userId: string, field: "allowedSkills" | "deniedSkills", rawValue: string) => {
+    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+    const nextValues = normalizeStringList(rawValue.split(/\r?\n|,/));
+    const existing = skillUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
+      userId: normalizedUserId,
+      allowedSkills: [],
+      deniedSkills: []
+    };
+    const next = {
+      ...existing,
+      [field]: nextValues
+    };
+    onSkillUserPermissionsChange(normalizeUserSkillPermissions([
+      ...skillUserPermissions.filter((item) => item.userId !== normalizedUserId),
+      next
+    ]));
+  };
+  const currentPermissionUserId = memoryUserId.trim() || DEFAULT_MEMORY_USER_ID;
+  const currentMcpPermission = mcpUserPermissions.find((item) => item.userId === currentPermissionUserId) ?? {
+    userId: currentPermissionUserId,
+    allowedTools: [],
+    deniedTools: []
+  };
+  const currentSkillPermission = skillUserPermissions.find((item) => item.userId === currentPermissionUserId) ?? {
+    userId: currentPermissionUserId,
+    allowedSkills: [],
+    deniedSkills: []
+  };
 
   const setServerMode = (endpoint: string, mode: McpExposureMode) => {
     const normalized = normalizeMcpEndpoint(endpoint);
@@ -4631,6 +4757,56 @@ function SettingsWorkspace(props: {
         <div className="empty-block compact">
           每个 MCP 都可以单独设置为立即加载 / 按需加载 / 禁用。按需加载的 MCP 默认不会把全部工具暴露给模型，模型需要先搜索再按需激活。
         </div>
+
+        <div className="section-head">
+          <div>
+            <h3>用户权限</h3>
+            <span>按默认用户 ID 限制可见/可调用的 MCP 工具与可加载的 skills；allowlist 为空表示默认允许全部，denylist 优先。</span>
+          </div>
+        </div>
+        <div className="form-grid">
+          <label className="field">
+            <span>当前用户可用 MCP 工具 allowlist</span>
+            <textarea
+              className="prompt-textarea"
+              onChange={(event) => updateMcpPermission(currentPermissionUserId, "allowedTools", event.target.value)}
+              placeholder={"每行或逗号一个工具名；支持 MCP 原始名或 mcp_<endpoint>__<tool> 完整名。留空表示允许全部。"}
+              value={permissionListToText(currentMcpPermission.allowedTools)}
+            />
+            <small>当前配置用户：{currentPermissionUserId}。保存后聊天和 MCP 预览都会只展示允许的工具。</small>
+          </label>
+          <label className="field">
+            <span>当前用户禁用 MCP 工具 denylist</span>
+            <textarea
+              className="prompt-textarea"
+              onChange={(event) => updateMcpPermission(currentPermissionUserId, "deniedTools", event.target.value)}
+              placeholder="每行或逗号一个工具名；denylist 优先于 allowlist。"
+              value={permissionListToText(currentMcpPermission.deniedTools)}
+            />
+            <small>适合临时屏蔽高风险工具；对直接工具调用也会生效。</small>
+          </label>
+          <label className="field">
+            <span>当前用户可加载 Skills allowlist</span>
+            <textarea
+              className="prompt-textarea"
+              onChange={(event) => updateSkillPermission(currentPermissionUserId, "allowedSkills", event.target.value)}
+              placeholder="每行或逗号一个 skill 名；留空表示允许全部。"
+              value={permissionListToText(currentSkillPermission.allowedSkills)}
+            />
+            <small>会影响系统提示词里的 skill 清单、Skills 管理页 effective 列表，以及 load_skill 工具。</small>
+          </label>
+          <label className="field">
+            <span>当前用户禁用 Skills denylist</span>
+            <textarea
+              className="prompt-textarea"
+              onChange={(event) => updateSkillPermission(currentPermissionUserId, "deniedSkills", event.target.value)}
+              placeholder="每行或逗号一个 skill 名；denylist 优先于 allowlist。"
+              value={permissionListToText(currentSkillPermission.deniedSkills)}
+            />
+            <small>用于隐藏并阻止加载指定 skill。</small>
+          </label>
+        </div>
+
         <label className="field">
           <span>Agent 提示词覆盖项</span>
           <textarea
@@ -5010,7 +5186,9 @@ async function fetchMcpPreview(
   configPath: string,
   rawBaseUrls: string,
   disabledUrls: string[] = [],
-  lazyUrls: string[] = []
+  lazyUrls: string[] = [],
+  userPermissions: AppSettings["mcpUserPermissions"] = [],
+  userId = ""
 ) {
   const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
   const params = new URLSearchParams();
@@ -5031,6 +5209,17 @@ async function fetchMcpPreview(
   );
   if (normalizedLazy.length) {
     params.set("lazy_urls", JSON.stringify(normalizedLazy));
+  }
+  const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+  if (normalizedUserId) {
+    params.set("user_id", normalizedUserId);
+  }
+  const permission = userPermissions.find((item) => item.userId === normalizedUserId);
+  if (permission?.allowedTools.length) {
+    params.set("allowed_tools", JSON.stringify(permission.allowedTools));
+  }
+  if (permission?.deniedTools.length) {
+    params.set("denied_tools", JSON.stringify(permission.deniedTools));
   }
 
   const query = params.toString();

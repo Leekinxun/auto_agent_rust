@@ -16,10 +16,11 @@ use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
     AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
-    McpOverrides, SteeringSubmission, UploadedFile,
+    McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
 };
 use crate::domain::settings::{
-    SharedFrontendSettings, load_shared_frontend_settings, save_shared_frontend_settings,
+    SharedFrontendSettings, UserMcpPermissions, UserSkillPermissions,
+    load_shared_frontend_settings, save_shared_frontend_settings,
 };
 
 pub fn router() -> Router<SharedState> {
@@ -52,6 +53,9 @@ struct McpSettingsQuery {
     base_urls: Option<String>,
     disabled_urls: Option<String>,
     lazy_urls: Option<String>,
+    user_id: Option<String>,
+    allowed_tools: Option<String>,
+    denied_tools: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,11 +87,26 @@ async fn agent_mcp_settings(
     State(state): State<SharedState>,
     Query(query): Query<McpSettingsQuery>,
 ) -> ApiResult<Json<crate::domain::chat::models::McpSettingsPreview>> {
+    let settings = load_shared_frontend_settings(&state.repo_root).await?;
+    let user_mcp_permissions =
+        resolve_user_mcp_permissions(&settings.mcp_user_permissions, query.user_id.as_deref());
+    let allowed_tools = parse_string_list(query.allowed_tools.as_deref(), "allowed_tools")?;
+    let denied_tools = parse_string_list(query.denied_tools.as_deref(), "denied_tools")?;
     let overrides = McpOverrides {
         config_path: query.config_path.and_then(non_empty),
         base_urls: parse_mcp_base_urls(query.base_urls.as_deref())?,
         disabled_urls: parse_mcp_base_urls(query.disabled_urls.as_deref())?,
         lazy_urls: parse_mcp_base_urls(query.lazy_urls.as_deref())?,
+        allowed_tools: if allowed_tools.is_empty() {
+            user_mcp_permissions.allowed_tools
+        } else {
+            allowed_tools
+        },
+        denied_tools: if denied_tools.is_empty() {
+            user_mcp_permissions.denied_tools
+        } else {
+            denied_tools
+        },
     };
     Ok(Json(
         state
@@ -289,6 +308,10 @@ async fn parse_chat_multipart(
     let mut mcp_base_urls_json: Option<String> = None;
     let mut mcp_disabled_urls_json: Option<String> = None;
     let mut mcp_lazy_urls_json: Option<String> = None;
+    let mut mcp_allowed_tools_json: Option<String> = None;
+    let mut mcp_denied_tools_json: Option<String> = None;
+    let mut skill_allowed_names_json: Option<String> = None;
+    let mut skill_denied_names_json: Option<String> = None;
     let mut files = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
@@ -325,6 +348,10 @@ async fn parse_chat_multipart(
             "mcp_base_urls" => mcp_base_urls_json = non_empty(value),
             "mcp_disabled_urls" => mcp_disabled_urls_json = non_empty(value),
             "mcp_lazy_urls" => mcp_lazy_urls_json = non_empty(value),
+            "mcp_allowed_tools" => mcp_allowed_tools_json = non_empty(value),
+            "mcp_denied_tools" => mcp_denied_tools_json = non_empty(value),
+            "skill_allowed_names" => skill_allowed_names_json = non_empty(value),
+            "skill_denied_names" => skill_denied_names_json = non_empty(value),
             _ => {}
         }
     }
@@ -358,6 +385,35 @@ async fn parse_chat_multipart(
     let mcp_base_urls = parse_mcp_base_urls(mcp_base_urls_json.as_deref())?;
     let mcp_disabled_urls = parse_mcp_base_urls(mcp_disabled_urls_json.as_deref())?;
     let mcp_lazy_urls = parse_mcp_base_urls(mcp_lazy_urls_json.as_deref())?;
+    let mut mcp_allowed_tools =
+        parse_string_list(mcp_allowed_tools_json.as_deref(), "mcp_allowed_tools")?;
+    let mut mcp_denied_tools =
+        parse_string_list(mcp_denied_tools_json.as_deref(), "mcp_denied_tools")?;
+    let mut skill_allowed_names =
+        parse_string_list(skill_allowed_names_json.as_deref(), "skill_allowed_names")?;
+    let mut skill_denied_names =
+        parse_string_list(skill_denied_names_json.as_deref(), "skill_denied_names")?;
+    let resolved_user_id = user_id.or(agent_id);
+
+    if mcp_allowed_tools.is_empty()
+        && mcp_denied_tools.is_empty()
+        && skill_allowed_names.is_empty()
+        && skill_denied_names.is_empty()
+    {
+        let settings = load_shared_frontend_settings(&state.repo_root).await?;
+        let user_mcp_permissions = resolve_user_mcp_permissions(
+            &settings.mcp_user_permissions,
+            resolved_user_id.as_deref(),
+        );
+        let user_skill_permissions = resolve_user_skill_permissions(
+            &settings.skill_user_permissions,
+            resolved_user_id.as_deref(),
+        );
+        mcp_allowed_tools = user_mcp_permissions.allowed_tools;
+        mcp_denied_tools = user_mcp_permissions.denied_tools;
+        skill_allowed_names = user_skill_permissions.allowed_skills;
+        skill_denied_names = user_skill_permissions.denied_skills;
+    }
 
     Ok(ChatRequest {
         message,
@@ -366,7 +422,7 @@ async fn parse_chat_multipart(
         system_override,
         system_append,
         session_id,
-        user_id: user_id.or(agent_id),
+        user_id: resolved_user_id,
         files,
         llm_overrides: LlmOverrides {
             model_id,
@@ -386,6 +442,12 @@ async fn parse_chat_multipart(
             base_urls: mcp_base_urls,
             disabled_urls: mcp_disabled_urls,
             lazy_urls: mcp_lazy_urls,
+            allowed_tools: mcp_allowed_tools,
+            denied_tools: mcp_denied_tools,
+        },
+        skill_permissions: SkillPermissions {
+            allowed_skills: skill_allowed_names,
+            denied_skills: skill_denied_names,
         },
     })
 }
@@ -479,13 +541,13 @@ where
         .map_err(|_| ApiError::bad_request(format!("{label} 格式不正确")))
 }
 
-fn parse_mcp_base_urls(raw: Option<&str>) -> ApiResult<Vec<String>> {
+fn parse_string_list(raw: Option<&str>, label: &str) -> ApiResult<Vec<String>> {
     let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(Vec::new());
     };
 
     let parsed = serde_json::from_str::<Vec<String>>(raw)
-        .map_err(|_| ApiError::bad_request("mcp_base_urls 必须是字符串数组 JSON"))?;
+        .map_err(|_| ApiError::bad_request(format!("{label} 必须是字符串数组 JSON")))?;
 
     let mut seen = std::collections::HashSet::new();
     Ok(parsed
@@ -494,6 +556,45 @@ fn parse_mcp_base_urls(raw: Option<&str>) -> ApiResult<Vec<String>> {
         .filter(|item| !item.is_empty())
         .filter(|item| seen.insert(item.clone()))
         .collect())
+}
+
+fn parse_mcp_base_urls(raw: Option<&str>) -> ApiResult<Vec<String>> {
+    let Some(raw) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+
+    parse_string_list(Some(raw), "mcp_base_urls")
+}
+
+fn resolve_user_mcp_permissions(
+    rules: &[UserMcpPermissions],
+    user_id: Option<&str>,
+) -> UserMcpPermissions {
+    let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return UserMcpPermissions::default();
+    };
+    rules
+        .iter()
+        .find(|rule| rule.user_id.trim() == user_id)
+        .cloned()
+        .unwrap_or_default()
+}
+
+fn resolve_user_skill_permissions(
+    rules: &[UserSkillPermissions],
+    user_id: Option<&str>,
+) -> SkillPermissions {
+    let Some(user_id) = user_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return SkillPermissions::default();
+    };
+    rules
+        .iter()
+        .find(|rule| rule.user_id.trim() == user_id)
+        .map(|rule| SkillPermissions {
+            allowed_skills: rule.allowed_skills.clone(),
+            denied_skills: rule.denied_skills.clone(),
+        })
+        .unwrap_or_default()
 }
 
 fn filesafe_fragment(name: &str) -> String {

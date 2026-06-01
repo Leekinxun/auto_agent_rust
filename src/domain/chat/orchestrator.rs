@@ -15,8 +15,8 @@ use crate::domain::chat::compaction::{
 };
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
-    HistoryEntry, McpServerPreviewDto, McpSettingsPreview, OutputFile, SkillUsage,
-    SystemPromptPreview,
+    HistoryEntry, McpServerPreviewDto, McpSettingsPreview, OutputFile, SkillPermissions,
+    SkillUsage, SystemPromptPreview,
 };
 use crate::domain::harness::HarnessAssets;
 use crate::domain::harness::snapshot::current_harness_snapshot_id;
@@ -181,6 +181,7 @@ impl ChatOrchestrator {
                             &prepared.mcp_overrides,
                             &mut mcp_tool_selection,
                             &mut skill_usages,
+                            &prepared.skill_permissions,
                         )
                         .await;
                     if tool_call.function.name == "compress" {
@@ -577,6 +578,7 @@ impl ChatOrchestrator {
                             &prepared.mcp_overrides,
                             &mut mcp_tool_selection,
                             &mut skill_usages,
+                            &prepared.skill_permissions,
                         )
                         .await;
                     if tool_call.function.name == "compress" {
@@ -777,7 +779,9 @@ impl ChatOrchestrator {
         let mut base_system = request
             .system_override
             .or(request.system)
-            .unwrap_or_else(|| self.build_system(request.user_id.as_deref()));
+            .unwrap_or_else(|| {
+                self.build_system(request.user_id.as_deref(), &request.skill_permissions)
+            });
         base_system = append_system_instruction(base_system, request.system_append.as_deref());
 
         let system_prompt = if matches!(mode, ChatMode::Memory) {
@@ -812,6 +816,7 @@ impl ChatOrchestrator {
             llm_overrides: request.llm_overrides,
             prompt_overrides: request.prompt_overrides,
             mcp_overrides: request.mcp_overrides,
+            skill_permissions: request.skill_permissions,
             trace_request,
             trace_prompts,
             trace_snapshot_id,
@@ -820,8 +825,9 @@ impl ChatOrchestrator {
 
     pub fn preview_system_prompts(&self, user_id: Option<&str>) -> Result<SystemPromptPreview> {
         let normalized_user_id = user_id.map(str::trim).filter(|value| !value.is_empty());
-        let stateless_prompt = self.build_system(None);
-        let memory_base_prompt = self.build_system(normalized_user_id);
+        let default_permissions = SkillPermissions::default();
+        let stateless_prompt = self.build_system(None, &default_permissions);
+        let memory_base_prompt = self.build_system(normalized_user_id, &default_permissions);
         let memory_prompt = if let Some(user_id) = normalized_user_id {
             let snapshot = self.memory_service.load_snapshot(user_id)?;
             self.memory_service
@@ -864,7 +870,7 @@ impl ChatOrchestrator {
         Ok(McpSettingsPreview { servers })
     }
 
-    fn build_system(&self, user_id: Option<&str>) -> String {
+    fn build_system(&self, user_id: Option<&str>, skill_permissions: &SkillPermissions) -> String {
         let scope = if user_id.is_some() {
             SkillScope::Effective
         } else {
@@ -873,6 +879,7 @@ impl ChatOrchestrator {
         let descriptions = self
             .skill_service
             .list_items(scope, user_id)
+            .map(|items| filter_skills_by_permissions(items, skill_permissions))
             .map(|items| self.skill_service.render_descriptions(&items))
             .unwrap_or_else(|_| "(no skills available)".to_string());
 
@@ -880,7 +887,12 @@ impl ChatOrchestrator {
         if descriptions == "(no skills available)" {
             base
         } else {
-            format!("{base}\n\nSkills available (call load_skill to use):\n{descriptions}")
+            format!(
+                "{base}
+
+Skills available (call load_skill to use):
+{descriptions}"
+            )
         }
     }
 
@@ -938,6 +950,7 @@ impl ChatOrchestrator {
         mcp_overrides: &crate::domain::chat::models::McpOverrides,
         mcp_tool_selection: &mut McpToolSelection,
         skill_usages: &mut Vec<SkillUsage>,
+        skill_permissions: &SkillPermissions,
     ) -> String {
         let arguments = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
             .unwrap_or_else(|_| json!({}));
@@ -1023,6 +1036,9 @@ impl ChatOrchestrator {
                     .filter(|value| !value.is_empty())
                     .context("load_skill requires a non-empty name")?;
                 let skill = self.skill_service.get_resolved_skill(name, user_id)?;
+                if !skill_allowed(&skill.name, skill_permissions) {
+                    anyhow::bail!("Skill not allowed for current user: {}", skill.name);
+                }
                 if memory_mode && user_id.is_some() {
                     skill_usages.push(SkillUsage {
                         name: skill.name.clone(),
@@ -1757,9 +1773,39 @@ struct PreparedRequest {
     llm_overrides: crate::domain::chat::models::LlmOverrides,
     prompt_overrides: AgentPromptOverrides,
     mcp_overrides: crate::domain::chat::models::McpOverrides,
+    skill_permissions: SkillPermissions,
     trace_request: HarnessTraceRequest,
     trace_prompts: HarnessTracePrompts,
     trace_snapshot_id: String,
+}
+
+fn skill_allowed(name: &str, permissions: &SkillPermissions) -> bool {
+    let normalized = name.trim();
+    if normalized.is_empty() {
+        return false;
+    }
+    if permissions
+        .denied_skills
+        .iter()
+        .any(|item| item.trim() == normalized)
+    {
+        return false;
+    }
+    permissions.allowed_skills.is_empty()
+        || permissions
+            .allowed_skills
+            .iter()
+            .any(|item| item.trim() == normalized)
+}
+
+fn filter_skills_by_permissions(
+    items: Vec<SkillDocument>,
+    permissions: &SkillPermissions,
+) -> Vec<SkillDocument> {
+    items
+        .into_iter()
+        .filter(|item| skill_allowed(&item.name, permissions))
+        .collect()
 }
 
 fn append_uploaded_files(
@@ -2369,10 +2415,7 @@ mod tests {
 
     #[test]
     fn system_override_takes_precedence_over_default_base_prompt() {
-        let prompt = append_system_instruction(
-            "override prompt".to_string(),
-            Some("appendix"),
-        );
+        let prompt = append_system_instruction("override prompt".to_string(), Some("appendix"));
         assert!(prompt.starts_with("override prompt"));
         assert!(prompt.contains("appendix"));
     }

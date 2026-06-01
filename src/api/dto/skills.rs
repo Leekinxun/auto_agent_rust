@@ -6,6 +6,8 @@ use crate::domain::skills::models::{SkillDocument, SkillScope};
 pub struct SkillsQuery {
     pub scope: Option<String>,
     pub user_id: Option<String>,
+    pub allowed_skills: Option<String>,
+    pub denied_skills: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -90,6 +90,18 @@ export type HealthState = {
 
 export type McpExposureMode = "eager" | "lazy" | "disabled";
 
+export type UserMcpPermission = {
+  userId: string;
+  allowedTools: string[];
+  deniedTools: string[];
+};
+
+export type UserSkillPermission = {
+  userId: string;
+  allowedSkills: string[];
+  deniedSkills: string[];
+};
+
 export type AppSettings = {
   apiBase: string;
   brandTitle: string;
@@ -99,6 +111,8 @@ export type AppSettings = {
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
   mcpLazyUrls: string[];
+  mcpUserPermissions: UserMcpPermission[];
+  skillUserPermissions: UserSkillPermission[];
   agentPromptOverride: string;
   agentPromptAppend: string;
   modelId: string;
@@ -391,6 +405,8 @@ export type SharedFrontendSettings = {
   mcpBaseUrls: string;
   mcpDisabledUrls: string[];
   mcpLazyUrls: string[];
+  mcpUserPermissions: UserMcpPermission[];
+  skillUserPermissions: UserSkillPermission[];
   agentPromptOverride: string;
   agentPromptAppend: string;
   modelId: string;

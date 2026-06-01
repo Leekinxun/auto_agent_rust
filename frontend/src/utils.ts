@@ -598,6 +598,69 @@ export function normalizeHarnessApplyPreview(value: unknown): HarnessApplyPrevie
   };
 }
 
+
+export function normalizeStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0)
+    .filter((item) => {
+      if (seen.has(item)) {
+        return false;
+      }
+      seen.add(item);
+      return true;
+    });
+}
+
+export function normalizeUserMcpPermissions(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    const userId = typeof item.user_id === "string"
+      ? item.user_id.trim()
+      : typeof item.userId === "string"
+        ? item.userId.trim()
+        : "";
+    const allowedTools = normalizeStringList(item.allowed_tools ?? item.allowedTools);
+    const deniedTools = normalizeStringList(item.denied_tools ?? item.deniedTools);
+    if (!userId || (!allowedTools.length && !deniedTools.length)) {
+      return [];
+    }
+    return [{ userId, allowedTools, deniedTools }];
+  });
+}
+
+export function normalizeUserSkillPermissions(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    const userId = typeof item.user_id === "string"
+      ? item.user_id.trim()
+      : typeof item.userId === "string"
+        ? item.userId.trim()
+        : "";
+    const allowedSkills = normalizeStringList(item.allowed_skills ?? item.allowedSkills);
+    const deniedSkills = normalizeStringList(item.denied_skills ?? item.deniedSkills);
+    if (!userId || (!allowedSkills.length && !deniedSkills.length)) {
+      return [];
+    }
+    return [{ userId, allowedSkills, deniedSkills }];
+  });
+}
+
 export function normalizeSharedFrontendSettings(value: unknown): SharedFrontendSettings | null {
   if (!isRecord(value)) {
     return null;
@@ -613,6 +676,8 @@ export function normalizeSharedFrontendSettings(value: unknown): SharedFrontendS
     mcpLazyUrls: Array.isArray(value.mcp_lazy_urls)
       ? value.mcp_lazy_urls.filter((item): item is string => typeof item === "string")
       : [],
+    mcpUserPermissions: normalizeUserMcpPermissions(value.mcp_user_permissions),
+    skillUserPermissions: normalizeUserSkillPermissions(value.skill_user_permissions),
     agentPromptOverride: typeof value.agent_prompt_override === "string" ? value.agent_prompt_override : "",
     agentPromptAppend: typeof value.agent_prompt_append === "string" ? value.agent_prompt_append : "",
     modelId: typeof value.model_id === "string" ? value.model_id : "",
@@ -762,6 +827,21 @@ export function buildFormData(
   }
   if (settings.mcpLazyUrls.length) {
     formData.append("mcp_lazy_urls", JSON.stringify(settings.mcpLazyUrls.map((item) => normalizeMcpEndpoint(item)).filter(Boolean)));
+  }
+  const userIdForPermissions = (settings.memoryUserId.trim() || config.userId || DEFAULT_MEMORY_USER_ID).trim();
+  const mcpPermissions = settings.mcpUserPermissions.find((item) => item.userId === userIdForPermissions);
+  if (mcpPermissions?.allowedTools.length) {
+    formData.append("mcp_allowed_tools", JSON.stringify(mcpPermissions.allowedTools));
+  }
+  if (mcpPermissions?.deniedTools.length) {
+    formData.append("mcp_denied_tools", JSON.stringify(mcpPermissions.deniedTools));
+  }
+  const skillPermissions = settings.skillUserPermissions.find((item) => item.userId === userIdForPermissions);
+  if (skillPermissions?.allowedSkills.length) {
+    formData.append("skill_allowed_names", JSON.stringify(skillPermissions.allowedSkills));
+  }
+  if (skillPermissions?.deniedSkills.length) {
+    formData.append("skill_denied_names", JSON.stringify(skillPermissions.deniedSkills));
   }
   appendOptionalFormData(formData, "system_override", settings.agentPromptOverride);
   appendOptionalFormData(formData, "system_append", settings.agentPromptAppend);

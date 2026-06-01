@@ -70,6 +70,8 @@ describe("frontend chat surface", () => {
         mcpBaseUrls: "http://mcp-a.example/mcp\nhttp://mcp-b.example/mcp",
         mcpDisabledUrls: ["http://mcp-b.example/mcp"],
         mcpLazyUrls: ["http://mcp-a.example/mcp"],
+        mcpUserPermissions: [{ userId: "user-1", allowedTools: ["read_file"], deniedTools: ["delete_file"] }],
+        skillUserPermissions: [{ userId: "user-1", allowedSkills: ["read_document"], deniedSkills: ["get_oil_data"] }],
         agentPromptOverride: "base override",
         agentPromptAppend: "extra prompt",
         modelId: "demo-model",
@@ -89,6 +91,10 @@ describe("frontend chat surface", () => {
     expect(formData.get("mcp_base_urls")).toBe("[\"http://mcp-a.example/mcp\",\"http://mcp-b.example/mcp\"]");
     expect(formData.get("mcp_disabled_urls")).toBe("[\"http://mcp-b.example/mcp\"]");
     expect(formData.get("mcp_lazy_urls")).toBe("[\"http://mcp-a.example/mcp\"]");
+    expect(formData.get("mcp_allowed_tools")).toBe("[\"read_file\"]");
+    expect(formData.get("mcp_denied_tools")).toBe("[\"delete_file\"]");
+    expect(formData.get("skill_allowed_names")).toBe("[\"read_document\"]");
+    expect(formData.get("skill_denied_names")).toBe("[\"get_oil_data\"]");
     expect(formData.get("system_override")).toBe("base override");
     expect(formData.get("system_append")).toBe("extra prompt");
     expect(formData.get("memory_maintenance_system")).toBe("memory sys");
@@ -375,6 +381,8 @@ describe("frontend chat surface", () => {
       mcp_base_urls: "http://demo/mcp",
       mcp_disabled_urls: ["http://a"],
       mcp_lazy_urls: ["http://b"],
+      mcp_user_permissions: [{ user_id: "user-1", allowed_tools: ["read_file"], denied_tools: ["delete_file"] }],
+      skill_user_permissions: [{ user_id: "user-1", allowed_skills: ["read_document"], denied_skills: ["get_oil_data"] }],
       agent_prompt_append: "append",
       model_id: "demo-model",
       temperature: "0.2",
@@ -385,6 +393,6 @@ describe("frontend chat surface", () => {
       memory_maintenance_user_prompt: "user",
       skill_learning_system_prompt: "skill sys",
       skill_learning_user_prompt: "skill user"
-    })?.brandTitle).toBe("共享标题");
+    })?.mcpUserPermissions[0].allowedTools).toEqual(["read_file"]);
   });
 });
