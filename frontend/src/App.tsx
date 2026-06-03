@@ -2057,13 +2057,16 @@ export default function App() {
   }
 
 
-  async function resolveHitlApproval(sessionId: string, approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) {
+  async function resolveHitlApproval(sessionId: string, approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) {
     try {
       const body: Record<string, unknown> = {
         resolved_by: settings.memoryUserId.trim() || DEFAULT_MEMORY_USER_ID
       };
+      if (resolution?.note?.trim()) {
+        body.note = resolution.note.trim();
+      }
       if (action === "modify") {
-        body.arguments = argumentsOverride ?? {};
+        body.arguments = resolution?.argumentsOverride ?? {};
       }
       await fetchJson(`/agent/session/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}/${action}`, {
         method: "POST",
@@ -2076,7 +2079,8 @@ export default function App() {
     }
   }
 
-  function renderChatWorkspace(mode: ChatModeId) {    return (
+  function renderChatWorkspace(mode: ChatModeId) {
+    return (
       <ChatWorkspace
         chat={chats[mode]}
         config={CHAT_MODES[mode]}
@@ -2084,7 +2088,7 @@ export default function App() {
         makeDownloadUrl={(file) => buildDownloadUrl(settings.apiBase, file)}
         onClear={() => replaceChats((current) => ({ ...current, [mode]: createInitialChats()[mode] }))}
         onInputChange={(value) => updateChat(mode, (current) => ({ ...current, input: value }))}
-        onResolveApproval={(approvalId, action, argumentsOverride) => resolveHitlApproval(CHAT_MODES[mode].sessionId, approvalId, action, argumentsOverride)}
+        onResolveApproval={(approvalId, action, resolution) => resolveHitlApproval(CHAT_MODES[mode].sessionId, approvalId, action, resolution)}
         onRemoveFile={(index) => updateChat(mode, (current) => ({
           ...current,
           files: current.files.filter((_, currentIndex) => currentIndex !== index)
@@ -2511,7 +2515,7 @@ function ChatWorkspace(props: {
   onInputChange: (value: string) => void;
   onSelectFiles: (files: File[]) => void;
   onRemoveFile: (index: number) => void;
-  onResolveApproval: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void;
+  onResolveApproval: (approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) => void;
   onSend: () => void;
   onStop: () => void;
   onClear: () => void;
@@ -2944,7 +2948,102 @@ function describeFinishReason(finishReason: string) {
   }
 }
 
-function renderProcessItem(item: ProcessItem, index: number, onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void) {
+type HitlApprovalAction = "approve" | "reject" | "modify";
+
+type HitlApprovalResolution = {
+  argumentsOverride?: unknown;
+  note?: string;
+};
+
+function HitlApprovalCard(props: {
+  item: Record<string, unknown>;
+  onResolveApproval?: (approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) => void;
+}) {
+  const { item, onResolveApproval } = props;
+  const approvalId = typeof item.approval_id === "string" ? item.approval_id : "";
+  const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : "需要人工确认";
+  const summary = typeof item.summary === "string" ? item.summary.trim() : "";
+  const risk = typeof item.risk_level === "string" ? item.risk_level : "medium";
+  const toolName = typeof item.tool_name === "string" ? item.tool_name : "unknown";
+  const argsText = JSON.stringify(item.arguments ?? {}, null, 2);
+  const [showCorrectionEditor, setShowCorrectionEditor] = useState(false);
+  const [argumentsDraft, setArgumentsDraft] = useState(argsText);
+  const [correctionNote, setCorrectionNote] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+  const disabled = submitted || !approvalId || !onResolveApproval;
+
+  const buildResolution = (): HitlApprovalResolution | undefined => {
+    const note = correctionNote.trim();
+    return note ? { note } : undefined;
+  };
+
+  const submitApproval = (action: HitlApprovalAction) => {
+    if (!approvalId || !onResolveApproval) {
+      return;
+    }
+    if (action === "modify") {
+      try {
+        const argumentsOverride = JSON.parse(argumentsDraft);
+        setSubmitted(true);
+        onResolveApproval(approvalId, "modify", {
+          argumentsOverride,
+          ...(correctionNote.trim() ? { note: correctionNote.trim() } : {})
+        });
+      } catch {
+        window.alert("纠偏后的工具参数必须是合法 JSON");
+      }
+      return;
+    }
+    setSubmitted(true);
+    onResolveApproval(approvalId, action, buildResolution());
+  };
+
+  return (
+    <div className="process-item approval-required">
+      <div className="process-item-header">
+        <span className="process-badge">HITL</span>
+        <strong>{title}</strong>
+      </div>
+      <div className="process-note">风险：{risk}；工具：{toolName}</div>
+      {summary ? <div className="process-note">{summary}</div> : null}
+      <div className="process-note">原始工具参数：</div>
+      <pre>{argsText}</pre>
+      <label className="hitl-correction-field">
+        <span>审批意见 / 纠偏说明（可选）</span>
+        <textarea
+          disabled={submitted}
+          onChange={(event) => setCorrectionNote(event.target.value)}
+          placeholder="例如：路径改到 outputs 下；只处理最近 7 天数据；拒绝原因等"
+          rows={2}
+          value={correctionNote}
+        />
+      </label>
+      {showCorrectionEditor ? (
+        <label className="hitl-correction-field">
+          <span>纠偏后的工具参数 JSON</span>
+          <textarea
+            disabled={submitted}
+            onChange={(event) => setArgumentsDraft(event.target.value)}
+            spellCheck={false}
+            value={argumentsDraft}
+          />
+          <small>修改这里会覆盖模型原始工具参数，然后继续执行该工具。</small>
+        </label>
+      ) : null}
+      <div className="button-row hitl-actions">
+        <button className="button primary" disabled={disabled} onClick={() => submitApproval("approve")} type="button">批准执行</button>
+        <button className="button secondary" disabled={submitted || !approvalId || !onResolveApproval} onClick={() => setShowCorrectionEditor((value) => !value)} type="button">
+          {showCorrectionEditor ? "收起纠偏输入" : "输入纠偏"}
+        </button>
+        <button className="button secondary" disabled={disabled || !showCorrectionEditor} onClick={() => submitApproval("modify")} type="button">按纠偏内容执行</button>
+        <button className="button danger" disabled={disabled} onClick={() => submitApproval("reject")} type="button">拒绝</button>
+      </div>
+      {submitted ? <div className="process-note">已提交审批处理，等待后端继续。</div> : null}
+    </div>
+  );
+}
+
+function renderProcessItem(item: ProcessItem, index: number, onResolveApproval?: (approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) => void) {
   if (isRecord(item) && item.event === "tool_use") {
     const title = typeof item.name === "string" && item.name.trim() ? item.name : "unknown";
     const argumentsText = typeof item.arguments === "string" ? item.arguments.trim() : "";
@@ -2975,41 +3074,12 @@ function renderProcessItem(item: ProcessItem, index: number, onResolveApproval?:
 
 
   if (isRecord(item) && item.event === "approval_required") {
-    const approvalId = typeof item.approval_id === "string" ? item.approval_id : "";
-    const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : "需要人工确认";
-    const summary = typeof item.summary === "string" ? item.summary.trim() : "";
-    const risk = typeof item.risk_level === "string" ? item.risk_level : "medium";
-    const toolName = typeof item.tool_name === "string" ? item.tool_name : "unknown";
-    const argsText = JSON.stringify(item.arguments ?? {}, null, 2);
-    const handleModify = () => {
-      if (!approvalId || !onResolveApproval) {
-        return;
-      }
-      const raw = window.prompt("修改后的工具参数 JSON", argsText);
-      if (raw === null) {
-        return;
-      }
-      try {
-        onResolveApproval(approvalId, "modify", JSON.parse(raw));
-      } catch {
-        window.alert("参数必须是合法 JSON");
-      }
-    };
     return (
-      <div className="process-item approval-required" key={`process-${index}`}>
-        <div className="process-item-header">
-          <span className="process-badge">HITL</span>
-          <strong>{title}</strong>
-        </div>
-        <div className="process-note">风险：{risk}；工具：{toolName}</div>
-        {summary ? <div className="process-note">{summary}</div> : null}
-        <pre>{argsText}</pre>
-        <div className="button-row hitl-actions">
-          <button className="button primary" disabled={!approvalId || !onResolveApproval} onClick={() => approvalId && onResolveApproval?.(approvalId, "approve")} type="button">批准执行</button>
-          <button className="button secondary" disabled={!approvalId || !onResolveApproval} onClick={handleModify} type="button">修改后批准</button>
-          <button className="button danger" disabled={!approvalId || !onResolveApproval} onClick={() => approvalId && onResolveApproval?.(approvalId, "reject")} type="button">拒绝</button>
-        </div>
-      </div>
+      <HitlApprovalCard
+        item={item}
+        key={`process-${index}`}
+        onResolveApproval={onResolveApproval}
+      />
     );
   }
 
@@ -3137,7 +3207,7 @@ function renderAssistantMessageContent(
   message: DisplayMessage,
   makeDownloadUrl: (file: OutputFile) => string,
   streamingReplyRef?: MutableRefObject<HTMLDivElement | null>,
-  onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void
+  onResolveApproval?: (approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) => void
 ) {
   const downloads = collectDownloadFiles(message);
   const streamingText = stripThinkingContent(message.text);
@@ -3222,7 +3292,7 @@ function ConversationTurnCard(props: {
   makeDownloadUrl: (file: OutputFile) => string;
   latestStreamingMessageId: string | null;
   latestStreamingReplyRef: MutableRefObject<HTMLDivElement | null>;
-  onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void;
+  onResolveApproval?: (approvalId: string, action: HitlApprovalAction, resolution?: HitlApprovalResolution) => void;
 }) {
   const { turn, makeDownloadUrl, latestStreamingMessageId, latestStreamingReplyRef, onResolveApproval } = props;
 

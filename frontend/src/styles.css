@@ -2220,6 +2220,42 @@ button {
   margin-top: 10px;
 }
 
+.hitl-correction-field {
+  display: grid;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.hitl-correction-field span {
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.hitl-correction-field textarea {
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(245, 158, 11, 0.28);
+  border-radius: 14px;
+  color: var(--text);
+  line-height: 1.55;
+  min-height: 84px;
+  outline: none;
+  padding: 10px 12px;
+  resize: vertical;
+  width: 100%;
+}
+
+.hitl-correction-field textarea:focus {
+  border-color: rgba(245, 158, 11, 0.6);
+  box-shadow: 0 0 0 4px rgba(245, 158, 11, 0.12);
+  background: #ffffff;
+}
+
+.hitl-correction-field small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .process-item.approval-required {
   border-color: rgba(245, 158, 11, 0.45);
   background: rgba(245, 158, 11, 0.08);
