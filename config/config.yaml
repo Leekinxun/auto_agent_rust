@@ -5,12 +5,35 @@
 # ---------- Agent / LLM（vllm openai 兼容接口）----------
 agent:
   model_id: "minimax-m2.5"   # vllm 上部署的模型名
+  system_prompt: |
+    You are a coding agent at {repo_root}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable.
+
+    IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be written under /app/outputs/ inside the container. In this workspace that maps to {outputs_dir}. Do not place downloadable deliverables in uploads, memory files, or other directories.
   max_tokens: 50000
   base_url: "http://10.100.3.22:9800/v1"  # vllm openai 兼容地址
   api_key: "EMPTY"                      # vllm 不需要真实 key
   max_iterations: 8
   subagent_max_iterations: 30
   auto_compact_token_threshold: 60000
+  tool_result_size_chars: 100000      # 单个工具结果超过该字符数时，落盘并只把预览+路径放入上下文（Hermes 风格）
+  tool_turn_budget_chars: 200000      # 单轮多个工具结果总字符预算，超出后优先落盘最大结果
+  tool_result_preview_chars: 1500     # 大结果落盘后保留在上下文里的预览长度
+
+# ---------- 人在回路（HITL） ----------
+hitl:
+  enabled: false                  # 开启后，匹配规则的工具调用会暂停等待人工确认
+  default_action: "auto"          # auto | require_approval | reject。#未命中是 自动执行/人工确认/拒绝执行
+  timeout_seconds: 300
+  rules:
+    - tool: "write_file"
+      require_approval: true
+      risk_level: "high"          #前端展示 风险值
+    - tool: "edit_file"
+      require_approval: true
+      risk_level: "high"
+    - tool_prefix: "mcp_"        #全部mcp。或 mcp_nb_mcp__delete_file
+      require_approval: false
+      risk_level: "medium"
 
 # ---------- FastAPI 服务 ----------
 server:

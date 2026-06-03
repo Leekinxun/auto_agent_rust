@@ -68,6 +68,9 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_MODEL_ID", "MODEL_ID"]) {
         config.agent.model_id = value;
     }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_SYSTEM_PROMPT"]) {
+        config.agent.system_prompt = value;
+    }
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_BASE_URL", "ANTHROPIC_BASE_URL"]) {
         config.agent.base_url = value;
     }
@@ -93,6 +96,24 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_AUTO_COMPACT_TOKEN_THRESHOLD"]) {
         config.agent.auto_compact_token_threshold =
             parse_positive_usize("AGENT_AUTO_COMPACT_TOKEN_THRESHOLD", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_TOOL_RESULT_SIZE_CHARS"]) {
+        config.agent.tool_result_size_chars =
+            parse_positive_usize("AGENT_TOOL_RESULT_SIZE_CHARS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_TOOL_TURN_BUDGET_CHARS"]) {
+        config.agent.tool_turn_budget_chars =
+            parse_positive_usize("AGENT_TOOL_TURN_BUDGET_CHARS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["AGENT_TOOL_RESULT_PREVIEW_CHARS"]) {
+        config.agent.tool_result_preview_chars =
+            parse_positive_usize("AGENT_TOOL_RESULT_PREVIEW_CHARS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["HITL_ENABLED"]) {
+        config.hitl.enabled = parse_bool_env("HITL_ENABLED", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(get_env, &["HITL_TIMEOUT_SECONDS"]) {
+        config.hitl.timeout_seconds = parse_positive_u64("HITL_TIMEOUT_SECONDS", &value)?;
     }
     if let Some(value) = first_non_empty_env(get_env, &["SERVER_HOST"]) {
         config.server.host = value;
@@ -214,6 +235,14 @@ fn parse_positive_usize(key: &str, raw: &str) -> Result<usize> {
     Ok(value)
 }
 
+fn parse_bool_env(key: &str, raw: &str) -> Result<bool> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => anyhow::bail!("{key} must be a boolean"),
+    }
+}
+
 fn parse_temperature(key: &str, raw: &str) -> Result<f32> {
     let value = parse_env::<f32>(key, raw)?;
     ensure!((0.0..=2.0).contains(&value), "{key} must be within 0 and 2");
@@ -248,6 +277,11 @@ mod tests {
             ("AGENT_MAX_ITERATIONS", "10"),
             ("AGENT_SUBAGENT_MAX_ITERATIONS", "25"),
             ("AGENT_AUTO_COMPACT_TOKEN_THRESHOLD", "45000"),
+            ("AGENT_TOOL_RESULT_SIZE_CHARS", "110000"),
+            ("AGENT_TOOL_TURN_BUDGET_CHARS", "210000"),
+            ("AGENT_TOOL_RESULT_PREVIEW_CHARS", "1600"),
+            ("HITL_ENABLED", "true"),
+            ("HITL_TIMEOUT_SECONDS", "120"),
             ("SERVER_HOST", "127.0.0.1"),
             ("SERVER_PORT", "19000"),
             ("CORS_ALLOW_ORIGINS", "http://a.example, http://b.example"),
@@ -271,6 +305,11 @@ mod tests {
         assert_eq!(config.agent.max_iterations, 10);
         assert_eq!(config.agent.subagent_max_iterations, 25);
         assert_eq!(config.agent.auto_compact_token_threshold, 45_000);
+        assert_eq!(config.agent.tool_result_size_chars, 110_000);
+        assert_eq!(config.agent.tool_turn_budget_chars, 210_000);
+        assert_eq!(config.agent.tool_result_preview_chars, 1_600);
+        assert!(config.hitl.enabled);
+        assert_eq!(config.hitl.timeout_seconds, 120);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 19000);
         assert_eq!(

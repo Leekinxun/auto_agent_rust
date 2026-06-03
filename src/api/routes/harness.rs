@@ -126,7 +126,7 @@ fn load_effective_harness_state(
     } else {
         fallback_config.clone()
     };
-    let harness = HarnessAssets::load(repo_root)?;
+    let harness = HarnessAssets::load(repo_root, &config)?;
     Ok((config, harness))
 }
 
@@ -451,15 +451,13 @@ mod tests {
     #[tokio::test]
     async fn returns_current_harness_snapshot() {
         let repo = TestRepo::new();
-        fs::create_dir_all(repo.root.join("harness/system")).unwrap();
-        fs::write(repo.root.join("harness/system/base.md"), "snapshot base").unwrap();
+        let mut config = AppConfig::default();
+        config.agent.system_prompt = "snapshot base".to_string();
 
-        let Json(snapshot) = get_harness_snapshot(State(build_test_state(
-            repo.root.clone(),
-            AppConfig::default(),
-        )))
-        .await
-        .unwrap();
+        let Json(snapshot) =
+            get_harness_snapshot(State(build_test_state(repo.root.clone(), config)))
+                .await
+                .unwrap();
 
         assert!(snapshot.memory_only_self_evolution);
         assert!(snapshot.snapshot_id.starts_with("hsnap-"));
@@ -796,7 +794,10 @@ mod tests {
         assert_eq!(result.approval.approved_by, "operator-a");
         assert_eq!(result.approval.status, HarnessApprovalStatus::Approved);
         assert_eq!(
-            std::fs::read_to_string(repo.root.join("harness/system/base.md")).unwrap(),
+            crate::config::loader::load_config(&repo.root)
+                .unwrap()
+                .agent
+                .system_prompt,
             "manual apply content"
         );
         assert_ne!(
@@ -863,7 +864,10 @@ mod tests {
             Some(applied.approval.approval_id.as_str())
         );
         assert_eq!(
-            std::fs::read_to_string(repo.root.join("harness/system/base.md")).unwrap(),
+            crate::config::loader::load_config(&repo.root)
+                .unwrap()
+                .agent
+                .system_prompt,
             applied.approval.changed_surfaces[0].before_content
         );
     }

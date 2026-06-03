@@ -18,6 +18,9 @@ import type {
   HarnessSnapshotSurface,
   SharedFrontendSettings,
   McpExposureMode,
+  HitlDefaultAction,
+  HitlRiskLevel,
+  HitlRule,
   McpServerPreview,
   OutputFile,
   PromptSource,
@@ -639,6 +642,50 @@ export function normalizeUserMcpPermissions(value: unknown) {
   });
 }
 
+
+function normalizeHitlDefaultAction(value: unknown): HitlDefaultAction {
+  return value === "require_approval" || value === "reject" ? value : "auto";
+}
+
+function normalizeHitlRiskLevel(value: unknown): HitlRiskLevel {
+  return value === "low" || value === "high" ? value : "medium";
+}
+
+export function normalizeHitlRules(value: unknown): HitlRule[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item)) {
+      return [];
+    }
+    const tool = typeof item.tool === "string" ? item.tool.trim() : "";
+    const toolPrefix = typeof item.tool_prefix === "string"
+      ? item.tool_prefix.trim()
+      : typeof item.toolPrefix === "string"
+        ? item.toolPrefix.trim()
+        : "";
+    if (!tool && !toolPrefix) {
+      return [];
+    }
+    return [{
+      tool: tool || null,
+      toolPrefix: toolPrefix || null,
+      requireApproval: Boolean(item.require_approval ?? item.requireApproval),
+      riskLevel: normalizeHitlRiskLevel(item.risk_level ?? item.riskLevel)
+    }];
+  });
+}
+
+export function serializeHitlRules(rules: HitlRule[]) {
+  return rules.map((rule) => ({
+    tool: rule.tool?.trim() || null,
+    tool_prefix: rule.toolPrefix?.trim() || null,
+    require_approval: rule.requireApproval,
+    risk_level: rule.riskLevel
+  })).filter((rule) => rule.tool || rule.tool_prefix);
+}
+
 export function normalizeUserSkillPermissions(value: unknown) {
   if (!Array.isArray(value)) {
     return [];
@@ -692,7 +739,15 @@ export function normalizeSharedFrontendSettings(value: unknown): SharedFrontendS
     skillLearningSystemPrompt:
       typeof value.skill_learning_system_prompt === "string" ? value.skill_learning_system_prompt : "",
     skillLearningUserPrompt:
-      typeof value.skill_learning_user_prompt === "string" ? value.skill_learning_user_prompt : ""
+      typeof value.skill_learning_user_prompt === "string" ? value.skill_learning_user_prompt : "",
+    hitlEnabled: Boolean(value.hitl_enabled),
+    hitlDefaultAction: normalizeHitlDefaultAction(value.hitl_default_action),
+    hitlTimeoutSeconds: typeof value.hitl_timeout_seconds === "string"
+      ? value.hitl_timeout_seconds
+      : typeof value.hitl_timeout_seconds === "number"
+        ? String(value.hitl_timeout_seconds)
+        : "300",
+    hitlRules: normalizeHitlRules(value.hitl_rules)
   };
 }
 
@@ -854,6 +909,12 @@ export function buildFormData(
   appendOptionalFormData(formData, "memory_maintenance_user_template", settings.memoryMaintenanceUserPrompt);
   appendOptionalFormData(formData, "skill_learning_system", settings.skillLearningSystemPrompt);
   appendOptionalFormData(formData, "skill_learning_user_template", settings.skillLearningUserPrompt);
+  formData.append("hitl_enabled", settings.hitlEnabled ? "true" : "false");
+  appendOptionalFormData(formData, "hitl_default_action", settings.hitlDefaultAction);
+  appendOptionalFormData(formData, "hitl_timeout_seconds", settings.hitlTimeoutSeconds);
+  if (settings.hitlRules.length) {
+    formData.append("hitl_rules", JSON.stringify(serializeHitlRules(settings.hitlRules)));
+  }
   files.forEach((file) => formData.append("files", file));
   return formData;
 }

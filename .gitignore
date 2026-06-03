@@ -11,6 +11,8 @@
 !/.sessions/.gitkeep
 /.transcripts/*
 !/.transcripts/.gitkeep
+/.tool-results/*
+!/.tool-results/.gitkeep
 /uploads/*
 !/uploads/.gitkeep
 /outputs/*

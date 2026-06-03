@@ -49,7 +49,7 @@ impl AppState {
         let session_service = SessionService::new(repo_root.clone());
         let llm_client = LlmClient::new(&config)?;
         let mcp_client = McpClient::new(&config)?;
-        let harness = HarnessAssets::load(&repo_root)?;
+        let harness = HarnessAssets::load(&repo_root, &config)?;
         let chat_orchestrator = ChatOrchestrator::new(
             repo_root.clone(),
             config.clone(),
@@ -90,7 +90,7 @@ impl AppState {
         } else {
             self.config.clone()
         };
-        let harness = HarnessAssets::load(&self.repo_root)?;
+        let harness = HarnessAssets::load(&self.repo_root, &config)?;
         let llm_client = LlmClient::new(&config)?;
         let mcp_client = McpClient::new(&config)?;
         let chat_orchestrator = ChatOrchestrator::new(

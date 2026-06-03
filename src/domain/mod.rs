@@ -1,6 +1,7 @@
 pub mod chat;
 pub mod events;
 pub mod harness;
+pub mod hitl;
 pub mod memory;
 pub mod session;
 pub mod settings;

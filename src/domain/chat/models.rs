@@ -1,5 +1,7 @@
 use serde::Serialize;
 
+use crate::domain::hitl::policy::{HitlDefaultAction, HitlPolicyRule};
+
 use crate::domain::skills::models::{SkillDocument, SkillScope};
 use crate::infra::mcp::client::McpServerPreview;
 
@@ -99,6 +101,24 @@ impl McpOverrides {
 }
 
 #[derive(Debug, Clone)]
+pub struct HitlOverrides {
+    pub enabled: bool,
+    pub default_action: HitlDefaultAction,
+    pub timeout_seconds: u64,
+    pub rules: Vec<HitlPolicyRule>,
+}
+
+impl Default for HitlOverrides {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_action: HitlDefaultAction::Auto,
+            timeout_seconds: 300,
+            rules: Vec::new(),
+        }
+    }
+}
+
 pub struct ChatRequest {
     pub message: String,
     pub history: Vec<HistoryEntry>,
@@ -112,6 +132,7 @@ pub struct ChatRequest {
     pub prompt_overrides: AgentPromptOverrides,
     pub mcp_overrides: McpOverrides,
     pub skill_permissions: SkillPermissions,
+    pub hitl_overrides: HitlOverrides,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -196,6 +217,19 @@ pub enum ChatEvent {
     Steering {
         message: String,
         skipped_tools: Vec<String>,
+    },
+    ApprovalRequired {
+        approval_id: String,
+        kind: String,
+        title: String,
+        summary: String,
+        risk_level: String,
+        tool_name: Option<String>,
+        arguments: serde_json::Value,
+    },
+    ApprovalResolved {
+        approval_id: String,
+        status: String,
     },
     FilesUploaded(Vec<UploadedFile>),
     OutputFiles(Vec<OutputFile>),

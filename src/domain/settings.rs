@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::hitl::policy::{HitlDefaultAction, HitlPolicyRule};
+
 const SHARED_FRONTEND_SETTINGS_PATH: &str = ".omx/state/frontend-settings.json";
 const DEFAULT_BRAND_TITLE: &str = "中科院智能体平台";
 const DEFAULT_BRAND_SUBTITLE: &str = "统一承载多模式智能体对话、技能管理与平台配置。";
@@ -29,6 +31,10 @@ pub struct SharedFrontendSettings {
     pub memory_maintenance_user_prompt: String,
     pub skill_learning_system_prompt: String,
     pub skill_learning_user_prompt: String,
+    pub hitl_enabled: bool,
+    pub hitl_default_action: HitlDefaultAction,
+    pub hitl_timeout_seconds: String,
+    pub hitl_rules: Vec<HitlPolicyRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -69,6 +75,10 @@ impl Default for SharedFrontendSettings {
             memory_maintenance_user_prompt: String::new(),
             skill_learning_system_prompt: String::new(),
             skill_learning_user_prompt: String::new(),
+            hitl_enabled: false,
+            hitl_default_action: HitlDefaultAction::Auto,
+            hitl_timeout_seconds: "300".to_string(),
+            hitl_rules: Vec::new(),
         }
     }
 }
@@ -137,8 +147,41 @@ impl SharedFrontendSettings {
             memory_maintenance_user_prompt: self.memory_maintenance_user_prompt.trim().to_string(),
             skill_learning_system_prompt: self.skill_learning_system_prompt.trim().to_string(),
             skill_learning_user_prompt: self.skill_learning_user_prompt.trim().to_string(),
+            hitl_enabled: self.hitl_enabled,
+            hitl_default_action: self.hitl_default_action.clone(),
+            hitl_timeout_seconds: self.hitl_timeout_seconds.trim().to_string(),
+            hitl_rules: normalize_hitl_rules(&self.hitl_rules),
         }
     }
+}
+
+fn normalize_hitl_rules(values: &[HitlPolicyRule]) -> Vec<HitlPolicyRule> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let tool = value
+                .tool
+                .as_deref()
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string);
+            let tool_prefix = value
+                .tool_prefix
+                .as_deref()
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string);
+            if tool.is_none() && tool_prefix.is_none() {
+                return None;
+            }
+            Some(HitlPolicyRule {
+                tool,
+                tool_prefix,
+                require_approval: value.require_approval,
+                risk_level: value.risk_level.clone(),
+            })
+        })
+        .collect()
 }
 
 fn normalize_mcp_permissions(values: &[UserMcpPermissions]) -> Vec<UserMcpPermissions> {
@@ -272,6 +315,15 @@ mod tests {
             memory_maintenance_user_prompt: "user".to_string(),
             skill_learning_system_prompt: "skill sys".to_string(),
             skill_learning_user_prompt: "skill user".to_string(),
+            hitl_enabled: true,
+            hitl_default_action: crate::domain::hitl::policy::HitlDefaultAction::Auto,
+            hitl_timeout_seconds: "120".to_string(),
+            hitl_rules: vec![crate::domain::hitl::policy::HitlPolicyRule {
+                tool: Some("write_file".to_string()),
+                require_approval: true,
+                risk_level: crate::domain::hitl::models::HitlRiskLevel::High,
+                ..crate::domain::hitl::policy::HitlPolicyRule::default()
+            }],
         };
 
         save_shared_frontend_settings(&repo.root, &settings)
@@ -285,6 +337,9 @@ mod tests {
         assert_eq!(loaded.mcp_lazy_urls, vec!["http://b"]);
         assert_eq!(loaded.agent_prompt_override, "override base");
         assert_eq!(loaded.agent_prompt_append, "be concise");
+        assert!(loaded.hitl_enabled);
+        assert_eq!(loaded.hitl_timeout_seconds, "120");
+        assert_eq!(loaded.hitl_rules[0].tool.as_deref(), Some("write_file"));
         assert_eq!(
             loaded.mcp_user_permissions[0].allowed_tools,
             vec!["read_file"]

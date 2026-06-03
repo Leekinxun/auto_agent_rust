@@ -15,8 +15,11 @@ use crate::domain::chat::compaction::{
 };
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
-    HistoryEntry, McpServerPreviewDto, McpSettingsPreview, OutputFile, SkillPermissions,
-    SkillUsage, SystemPromptPreview,
+    HistoryEntry, HitlOverrides, McpServerPreviewDto, McpSettingsPreview, OutputFile,
+    SkillPermissions, SkillUsage, SystemPromptPreview,
+};
+use crate::domain::chat::tool_context::{
+    ToolContextBudget, enforce_tool_turn_budget, prepare_tool_result_for_context,
 };
 use crate::domain::harness::HarnessAssets;
 use crate::domain::harness::snapshot::current_harness_snapshot_id;
@@ -28,6 +31,11 @@ use crate::domain::harness::{
     MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH, PromptSource,
     SKILL_LEARNING_SYSTEM_PATH, SKILL_LEARNING_USER_TEMPLATE_PATH, resolve_repo_prompt_source,
 };
+use crate::domain::hitl::models::{
+    HitlDecisionRequest, HitlDecisionResolution, HitlDecisionStatus,
+};
+use crate::domain::hitl::policy::{HitlPolicyDecision, evaluate_tool_hitl_policy};
+use crate::domain::hitl::service::{write_hitl_request, write_hitl_resolution};
 use crate::domain::memory::service::UserMemoryService;
 use crate::domain::session::service::{SessionContext, SessionService};
 use crate::domain::skills::models::{SkillDocument, SkillScope};
@@ -170,6 +178,7 @@ impl ChatOrchestrator {
 
                 let mut compress_requested = false;
                 let mut steering_interrupted = false;
+                let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
                     let result = self
@@ -182,12 +191,21 @@ impl ChatOrchestrator {
                             &mut mcp_tool_selection,
                             &mut skill_usages,
                             &prepared.skill_permissions,
+                            &prepared.hitl_overrides,
+                            active_run_generation,
+                            None,
                         )
                         .await;
                     if tool_call.function.name == "compress" {
                         compress_requested = true;
                     }
-                    messages.push(ChatMessage::tool(tool_call.id.clone(), result));
+                    let context_result = self
+                        .prepare_tool_result_for_context(tool_call, result)
+                        .await;
+                    messages.push(ChatMessage::tool(
+                        tool_call.id.clone(),
+                        context_result.model_content,
+                    ));
 
                     if self.apply_steering_interrupt(
                         &mut messages,
@@ -200,6 +218,9 @@ impl ChatOrchestrator {
                         break;
                     }
                 }
+
+                self.enforce_tool_turn_budget(&mut messages, turn_tool_message_start)
+                    .await;
 
                 if compress_requested {
                     messages = auto_compact(
@@ -556,6 +577,7 @@ impl ChatOrchestrator {
 
                 let mut compress_requested = false;
                 let mut steering_interrupted = false;
+                let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
                     if !try_send_stream_event(
@@ -579,6 +601,9 @@ impl ChatOrchestrator {
                             &mut mcp_tool_selection,
                             &mut skill_usages,
                             &prepared.skill_permissions,
+                            &prepared.hitl_overrides,
+                            active_run_generation,
+                            Some(&sender),
                         )
                         .await;
                     if tool_call.function.name == "compress" {
@@ -596,7 +621,13 @@ impl ChatOrchestrator {
                     {
                         return Ok(());
                     }
-                    messages.push(ChatMessage::tool(tool_call.id.clone(), result));
+                    let context_result = self
+                        .prepare_tool_result_for_context(tool_call, result)
+                        .await;
+                    messages.push(ChatMessage::tool(
+                        tool_call.id.clone(),
+                        context_result.model_content,
+                    ));
 
                     if self.apply_steering_interrupt(
                         &mut messages,
@@ -609,6 +640,9 @@ impl ChatOrchestrator {
                         break;
                     }
                 }
+
+                self.enforce_tool_turn_budget(&mut messages, turn_tool_message_start)
+                    .await;
 
                 if compress_requested {
                     messages = auto_compact(
@@ -817,6 +851,7 @@ impl ChatOrchestrator {
             prompt_overrides: request.prompt_overrides,
             mcp_overrides: request.mcp_overrides,
             skill_permissions: request.skill_permissions,
+            hitl_overrides: request.hitl_overrides,
             trace_request,
             trace_prompts,
             trace_snapshot_id,
@@ -941,6 +976,157 @@ Skills available (call load_skill to use):
         tools
     }
 
+    async fn apply_hitl_gate(
+        &self,
+        tool_call: &ToolCall,
+        arguments: &mut serde_json::Value,
+        session: Option<&SessionContext>,
+        hitl_overrides: &HitlOverrides,
+        active_run_generation: Option<u64>,
+        sender: Option<&mpsc::Sender<ChatEvent>>,
+    ) -> Option<String> {
+        let tool_name = tool_call.function.name.as_str();
+        let policy = evaluate_tool_hitl_policy(
+            hitl_overrides.enabled,
+            &hitl_overrides.default_action,
+            &hitl_overrides.rules,
+            tool_name,
+        );
+        match policy {
+            HitlPolicyDecision::Allow => None,
+            HitlPolicyDecision::Reject { reason } => Some(format!(
+                "HITL policy rejected tool call {tool_name}: {reason}"
+            )),
+            HitlPolicyDecision::RequireApproval { risk_level } => {
+                let Some(session) = session else {
+                    return Some(format!(
+                        "HITL approval required for {tool_name}, but no session is available to route the approval."
+                    ));
+                };
+                let Some(generation) = active_run_generation else {
+                    return Some(format!(
+                        "HITL approval required for {tool_name}, but no active run generation is available."
+                    ));
+                };
+                let Some(sender) = sender else {
+                    return Some(format!(
+                        "HITL approval required for {tool_name}. Please rerun in streaming mode to approve or disable HITL for this tool."
+                    ));
+                };
+                let request = match HitlDecisionRequest::new_tool_call(
+                    &session.session_id,
+                    generation,
+                    tool_name,
+                    arguments.clone(),
+                    risk_level,
+                    hitl_overrides.timeout_seconds,
+                ) {
+                    Ok(request) => request,
+                    Err(error) => return Some(format!("HITL request failed: {error}")),
+                };
+                let approval_id = request.approval_id.clone();
+                let rx = session.register_hitl_request(request.clone());
+                if let Err(error) = write_hitl_request(&self.repo_root, &request).await {
+                    tracing::warn!(?error, approval_id, "failed to persist HITL request");
+                }
+                if !try_send_stream_event(
+                    sender,
+                    ChatEvent::ApprovalRequired {
+                        approval_id: request.approval_id.clone(),
+                        kind: "tool_call".to_string(),
+                        title: request.title.clone(),
+                        summary: request.summary.clone(),
+                        risk_level: request.risk_level.as_str().to_string(),
+                        tool_name: request.tool_name.clone(),
+                        arguments: request.arguments.clone(),
+                    },
+                )
+                .await
+                {
+                    return Some(format!(
+                        "HITL approval required for {tool_name}, but the client disconnected."
+                    ));
+                }
+                let resolution = session
+                    .wait_hitl_resolution(&approval_id, rx, hitl_overrides.timeout_seconds)
+                    .await;
+                if let Err(error) = write_hitl_resolution(&self.repo_root, &resolution).await {
+                    tracing::warn!(?error, approval_id, "failed to persist HITL resolution");
+                }
+                let _ = try_send_stream_event(
+                    sender,
+                    ChatEvent::ApprovalResolved {
+                        approval_id: approval_id.clone(),
+                        status: hitl_status_label(&resolution).to_string(),
+                    },
+                )
+                .await;
+                match resolution.status {
+                    HitlDecisionStatus::Approved => None,
+                    HitlDecisionStatus::Modified => {
+                        if let Some(modified) = resolution.modified_arguments {
+                            *arguments = modified;
+                        }
+                        None
+                    }
+                    HitlDecisionStatus::Rejected => Some(format!(
+                        "Tool call {tool_name} was rejected by human operator {}{}.",
+                        resolution.resolved_by,
+                        resolution
+                            .note
+                            .as_deref()
+                            .filter(|note| !note.trim().is_empty())
+                            .map(|note| format!(": {note}"))
+                            .unwrap_or_default()
+                    )),
+                    HitlDecisionStatus::Expired => Some(format!(
+                        "Tool call {tool_name} was not executed because HITL approval timed out."
+                    )),
+                    HitlDecisionStatus::Pending => Some(format!(
+                        "Tool call {tool_name} is still pending HITL approval."
+                    )),
+                }
+            }
+        }
+    }
+
+    async fn prepare_tool_result_for_context(
+        &self,
+        tool_call: &ToolCall,
+        result: String,
+    ) -> crate::domain::chat::tool_context::ToolContextResult {
+        prepare_tool_result_for_context(
+            &self.repo_root,
+            &tool_call.function.name,
+            &tool_call.id,
+            result,
+            self.tool_context_budget(),
+        )
+        .await
+    }
+
+    fn tool_context_budget(&self) -> ToolContextBudget {
+        ToolContextBudget {
+            result_size_chars: self.config.agent.tool_result_size_chars,
+            turn_budget_chars: self.config.agent.tool_turn_budget_chars,
+            preview_size_chars: self.config.agent.tool_result_preview_chars,
+        }
+    }
+
+    async fn enforce_tool_turn_budget(
+        &self,
+        messages: &mut [ChatMessage],
+        turn_tool_message_start: usize,
+    ) {
+        enforce_tool_turn_budget(
+            &self.repo_root,
+            messages,
+            turn_tool_message_start,
+            self.tool_context_budget(),
+        )
+        .await;
+    }
+
     async fn dispatch_public_tool(
         &self,
         tool_call: &ToolCall,
@@ -951,10 +1137,28 @@ Skills available (call load_skill to use):
         mcp_tool_selection: &mut McpToolSelection,
         skill_usages: &mut Vec<SkillUsage>,
         skill_permissions: &SkillPermissions,
+        hitl_overrides: &HitlOverrides,
+        active_run_generation: Option<u64>,
+        sender: Option<&mpsc::Sender<ChatEvent>>,
     ) -> String {
-        let arguments = serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
-            .unwrap_or_else(|_| json!({}));
+        let mut arguments =
+            serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
+                .unwrap_or_else(|_| json!({}));
         let tool_name = tool_call.function.name.as_str();
+
+        if let Some(resolution) = self
+            .apply_hitl_gate(
+                tool_call,
+                &mut arguments,
+                session,
+                hitl_overrides,
+                active_run_generation,
+                sender,
+            )
+            .await
+        {
+            return resolution;
+        }
 
         if tool_name.starts_with("mcp_") {
             return self
@@ -1684,6 +1888,16 @@ async fn try_send_stream_event(sender: &mpsc::Sender<ChatEvent>, event: ChatEven
     sender.send(event).await.is_ok()
 }
 
+fn hitl_status_label(resolution: &HitlDecisionResolution) -> &'static str {
+    match resolution.status {
+        HitlDecisionStatus::Pending => "pending",
+        HitlDecisionStatus::Approved => "approved",
+        HitlDecisionStatus::Rejected => "rejected",
+        HitlDecisionStatus::Modified => "modified",
+        HitlDecisionStatus::Expired => "expired",
+    }
+}
+
 fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Value> {
     let mut tools = public_file_tool_schemas();
     tools.extend(public_compaction_tool_schemas());
@@ -1774,6 +1988,7 @@ struct PreparedRequest {
     prompt_overrides: AgentPromptOverrides,
     mcp_overrides: crate::domain::chat::models::McpOverrides,
     skill_permissions: SkillPermissions,
+    hitl_overrides: HitlOverrides,
     trace_request: HarnessTraceRequest,
     trace_prompts: HarnessTracePrompts,
     trace_snapshot_id: String,
@@ -2319,7 +2534,8 @@ mod tests {
     #[test]
     fn subagent_starts_with_isolated_context_only() {
         let repo = TestRepo::new();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness =
+            HarnessAssets::load(&repo.root, &crate::config::model::AppConfig::default()).unwrap();
         let messages = build_subagent_initial_messages(
             harness.render_subagent_system("Explore"),
             "inspect README",
@@ -2347,7 +2563,8 @@ mod tests {
     #[test]
     fn recovery_prompt_forces_final_answer_without_tools() {
         let repo = TestRepo::new();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness =
+            HarnessAssets::load(&repo.root, &crate::config::model::AppConfig::default()).unwrap();
         let prompt = harness.render_final_answer_recovery("max_iterations");
         assert!(prompt.contains("without any user-visible answer"));
         assert!(prompt.contains("finish_reason: max_iterations"));
@@ -2355,16 +2572,13 @@ mod tests {
     }
 
     #[test]
-    fn preview_system_prompt_uses_file_backed_harness_template() {
+    fn preview_system_prompt_uses_configured_agent_template() {
         let repo = TestRepo::new();
-        fs::create_dir_all(repo.root.join("harness/system")).unwrap();
-        fs::write(
-            repo.root.join("harness/system/base.md"),
-            "custom-system {repo_root} -> {outputs_dir}",
-        )
-        .unwrap();
+        let mut orchestrator = build_test_orchestrator(&repo.root);
+        orchestrator.config.agent.system_prompt =
+            "custom-system {repo_root} -> {outputs_dir}".to_string();
+        orchestrator.harness = HarnessAssets::load(&repo.root, &orchestrator.config).unwrap();
 
-        let orchestrator = build_test_orchestrator(&repo.root);
         let preview = orchestrator.preview_system_prompts(None).unwrap();
 
         assert!(preview.stateless_prompt.contains("custom-system"));
@@ -2611,7 +2825,7 @@ mod tests {
         let worktree_service =
             WorktreeService::new(repo_root.clone(), task_service.clone(), event_service).unwrap();
         let session_service = SessionService::new(repo_root.clone());
-        let harness = HarnessAssets::load(&repo_root).unwrap();
+        let harness = HarnessAssets::load(&repo_root, &config).unwrap();
         let llm_client = LlmClient::new(&config).unwrap();
         let mcp_client = McpClient::new(&config).unwrap();
         ChatOrchestrator::new(

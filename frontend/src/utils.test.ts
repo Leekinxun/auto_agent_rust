@@ -82,7 +82,11 @@ describe("frontend chat surface", () => {
         memoryMaintenanceSystemPrompt: "memory sys",
         memoryMaintenanceUserPrompt: "memory user",
         skillLearningSystemPrompt: "skill sys",
-        skillLearningUserPrompt: "skill user"
+        skillLearningUserPrompt: "skill user",
+        hitlEnabled: true,
+        hitlDefaultAction: "auto",
+        hitlTimeoutSeconds: "300",
+        hitlRules: [{ tool: "write_file", toolPrefix: null, requireApproval: true, riskLevel: "high" }]
       }
     );
 

@@ -1,6 +1,8 @@
 export type ViewId = "stream" | "memoryStream" | "harness" | "skills" | "settings";
 export type ChatModeId = "stream" | "memoryStream";
 export type ToastTone = "info" | "success" | "error";
+export type HitlDefaultAction = "auto" | "require_approval" | "reject";
+export type HitlRiskLevel = "low" | "medium" | "high";
 export type SkillScope = "shared" | "private" | "effective";
 
 export type HistoryEntry = {
@@ -35,6 +37,21 @@ export type ProcessItem =
     event: "steering";
     message?: string;
     skipped_tools?: string[];
+  }
+  | {
+    event: "approval_required";
+    approval_id?: string;
+    kind?: string;
+    title?: string;
+    summary?: string;
+    risk_level?: string;
+    tool_name?: string | null;
+    arguments?: unknown;
+  }
+  | {
+    event: "approval_resolved";
+    approval_id?: string;
+    status?: string;
   }
   | {
     event: "files_uploaded";
@@ -102,6 +119,13 @@ export type UserSkillPermission = {
   deniedSkills: string[];
 };
 
+export type HitlRule = {
+  tool?: string | null;
+  toolPrefix?: string | null;
+  requireApproval: boolean;
+  riskLevel: HitlRiskLevel;
+};
+
 export type AppSettings = {
   apiBase: string;
   brandTitle: string;
@@ -124,6 +148,10 @@ export type AppSettings = {
   memoryMaintenanceUserPrompt: string;
   skillLearningSystemPrompt: string;
   skillLearningUserPrompt: string;
+  hitlEnabled: boolean;
+  hitlDefaultAction: HitlDefaultAction;
+  hitlTimeoutSeconds: string;
+  hitlRules: HitlRule[];
 };
 
 export type SkillItem = {
@@ -418,4 +446,8 @@ export type SharedFrontendSettings = {
   memoryMaintenanceUserPrompt: string;
   skillLearningSystemPrompt: string;
   skillLearningUserPrompt: string;
+  hitlEnabled: boolean;
+  hitlDefaultAction: HitlDefaultAction;
+  hitlTimeoutSeconds: string;
+  hitlRules: HitlRule[];
 };

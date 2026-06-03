@@ -222,8 +222,9 @@ mod tests {
         .unwrap();
 
         let mut config = AppConfig::default();
+        config.agent.system_prompt = "custom base".to_string();
         config.memory.prompts.maintenance_system = "custom maintenance system".to_string();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
 
         let snapshot = build_harness_snapshot(&repo.root, &config, &harness).unwrap();
 

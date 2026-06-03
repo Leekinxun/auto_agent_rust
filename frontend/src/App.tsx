@@ -18,6 +18,9 @@ import type {
   SharedFrontendSettings,
   HealthState,
   HistoryEntry,
+  HitlDefaultAction,
+  HitlRiskLevel,
+  HitlRule,
   McpExposureMode,
   OutputFile,
   ProcessItem,
@@ -57,6 +60,8 @@ import {
   normalizeStringList,
   normalizeUserMcpPermissions,
   normalizeUserSkillPermissions,
+  normalizeHitlRules,
+  serializeHitlRules,
   normalizeApiBase,
   normalizeMcpEndpoint,
   normalizeMcpPreviewServers,
@@ -161,7 +166,15 @@ const DEFAULT_SETTINGS: AppSettings = {
   memoryMaintenanceSystemPrompt: "",
   memoryMaintenanceUserPrompt: "",
   skillLearningSystemPrompt: "",
-  skillLearningUserPrompt: ""
+  skillLearningUserPrompt: "",
+  hitlEnabled: false,
+  hitlDefaultAction: "auto",
+  hitlTimeoutSeconds: "300",
+  hitlRules: [
+    { tool: "write_file", toolPrefix: null, requireApproval: true, riskLevel: "high" },
+    { tool: "edit_file", toolPrefix: null, requireApproval: true, riskLevel: "high" },
+    { tool: null, toolPrefix: "mcp_", requireApproval: false, riskLevel: "medium" }
+  ]
 };
 
 const SKILL_EDITOR_STORAGE_KEY = "auto_claude_code_frontend_skill_editor_v1";
@@ -507,7 +520,11 @@ function buildSharedFrontendSettings(settings: AppSettings): SharedFrontendSetti
     memoryMaintenanceSystemPrompt: settings.memoryMaintenanceSystemPrompt,
     memoryMaintenanceUserPrompt: settings.memoryMaintenanceUserPrompt,
     skillLearningSystemPrompt: settings.skillLearningSystemPrompt,
-    skillLearningUserPrompt: settings.skillLearningUserPrompt
+    skillLearningUserPrompt: settings.skillLearningUserPrompt,
+    hitlEnabled: settings.hitlEnabled,
+    hitlDefaultAction: settings.hitlDefaultAction,
+    hitlTimeoutSeconds: settings.hitlTimeoutSeconds,
+    hitlRules: normalizeHitlRules(settings.hitlRules)
   };
 }
 
@@ -534,7 +551,11 @@ function applySharedFrontendSettings(current: AppSettings, shared: SharedFronten
     memoryMaintenanceSystemPrompt: shared.memoryMaintenanceSystemPrompt,
     memoryMaintenanceUserPrompt: shared.memoryMaintenanceUserPrompt,
     skillLearningSystemPrompt: shared.skillLearningSystemPrompt,
-    skillLearningUserPrompt: shared.skillLearningUserPrompt
+    skillLearningUserPrompt: shared.skillLearningUserPrompt,
+    hitlEnabled: shared.hitlEnabled,
+    hitlDefaultAction: shared.hitlDefaultAction,
+    hitlTimeoutSeconds: shared.hitlTimeoutSeconds || DEFAULT_SETTINGS.hitlTimeoutSeconds,
+    hitlRules: normalizeHitlRules(shared.hitlRules)
   };
 }
 
@@ -584,7 +605,13 @@ function loadSettings(): AppSettings {
         : DEFAULT_SETTINGS.skillLearningSystemPrompt,
       skillLearningUserPrompt: typeof parsed.skillLearningUserPrompt === "string"
         ? parsed.skillLearningUserPrompt
-        : DEFAULT_SETTINGS.skillLearningUserPrompt
+        : DEFAULT_SETTINGS.skillLearningUserPrompt,
+      hitlEnabled: typeof parsed.hitlEnabled === "boolean" ? parsed.hitlEnabled : DEFAULT_SETTINGS.hitlEnabled,
+      hitlDefaultAction: parsed.hitlDefaultAction === "require_approval" || parsed.hitlDefaultAction === "reject"
+        ? parsed.hitlDefaultAction
+        : DEFAULT_SETTINGS.hitlDefaultAction,
+      hitlTimeoutSeconds: typeof parsed.hitlTimeoutSeconds === "string" ? parsed.hitlTimeoutSeconds : DEFAULT_SETTINGS.hitlTimeoutSeconds,
+      hitlRules: normalizeHitlRules(parsed.hitlRules).length ? normalizeHitlRules(parsed.hitlRules) : DEFAULT_SETTINGS.hitlRules
     };
   } catch {
     return DEFAULT_SETTINGS;
@@ -713,6 +740,10 @@ export default function App() {
   const [draftMemoryMaintenanceUserPrompt, setDraftMemoryMaintenanceUserPrompt] = useState(settings.memoryMaintenanceUserPrompt);
   const [draftSkillLearningSystemPrompt, setDraftSkillLearningSystemPrompt] = useState(settings.skillLearningSystemPrompt);
   const [draftSkillLearningUserPrompt, setDraftSkillLearningUserPrompt] = useState(settings.skillLearningUserPrompt);
+  const [draftHitlEnabled, setDraftHitlEnabled] = useState(settings.hitlEnabled);
+  const [draftHitlDefaultAction, setDraftHitlDefaultAction] = useState<HitlDefaultAction>(settings.hitlDefaultAction);
+  const [draftHitlTimeoutSeconds, setDraftHitlTimeoutSeconds] = useState(settings.hitlTimeoutSeconds);
+  const [draftHitlRules, setDraftHitlRules] = useState<HitlRule[]>(settings.hitlRules);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [health, setHealth] = useState<HealthState>({ tone: "loading", label: "连接中..." });
   const [chats, setChats] = useState<Record<ChatModeId, ChatState>>(createInitialChats);
@@ -780,6 +811,10 @@ export default function App() {
     setDraftMemoryMaintenanceUserPrompt(settings.memoryMaintenanceUserPrompt);
     setDraftSkillLearningSystemPrompt(settings.skillLearningSystemPrompt);
     setDraftSkillLearningUserPrompt(settings.skillLearningUserPrompt);
+    setDraftHitlEnabled(settings.hitlEnabled);
+    setDraftHitlDefaultAction(settings.hitlDefaultAction);
+    setDraftHitlTimeoutSeconds(settings.hitlTimeoutSeconds);
+    setDraftHitlRules(settings.hitlRules);
   }, [settings]);
 
   useEffect(() => {
@@ -1092,7 +1127,11 @@ export default function App() {
         memory_maintenance_system_prompt: settingsToPersist.memoryMaintenanceSystemPrompt,
         memory_maintenance_user_prompt: settingsToPersist.memoryMaintenanceUserPrompt,
         skill_learning_system_prompt: settingsToPersist.skillLearningSystemPrompt,
-        skill_learning_user_prompt: settingsToPersist.skillLearningUserPrompt
+        skill_learning_user_prompt: settingsToPersist.skillLearningUserPrompt,
+        hitl_enabled: settingsToPersist.hitlEnabled,
+        hitl_default_action: settingsToPersist.hitlDefaultAction,
+        hitl_timeout_seconds: settingsToPersist.hitlTimeoutSeconds,
+        hitl_rules: serializeHitlRules(settingsToPersist.hitlRules)
       })
     });
     if (!response.ok) {
@@ -1789,7 +1828,7 @@ export default function App() {
           return;
         }
 
-        if ((eventName === "tool_use" || eventName === "tool_result") && payload) {
+        if ((eventName === "tool_use" || eventName === "tool_result" || eventName === "approval_required" || eventName === "approval_resolved") && payload) {
           appendProcessItem(config.id, activeAssistantId, { event: eventName, ...payload });
           return;
         }
@@ -2017,8 +2056,27 @@ export default function App() {
     }
   }
 
-  function renderChatWorkspace(mode: ChatModeId) {
-    return (
+
+  async function resolveHitlApproval(sessionId: string, approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) {
+    try {
+      const body: Record<string, unknown> = {
+        resolved_by: settings.memoryUserId.trim() || DEFAULT_MEMORY_USER_ID
+      };
+      if (action === "modify") {
+        body.arguments = argumentsOverride ?? {};
+      }
+      await fetchJson(`/agent/session/${encodeURIComponent(sessionId)}/approvals/${encodeURIComponent(approvalId)}/${action}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      showToast(action === "reject" ? "已拒绝 HITL 审批" : "已提交 HITL 审批", "success");
+    } catch (error) {
+      showToast(`HITL 审批提交失败：${getErrorMessage(error)}`, "error");
+    }
+  }
+
+  function renderChatWorkspace(mode: ChatModeId) {    return (
       <ChatWorkspace
         chat={chats[mode]}
         config={CHAT_MODES[mode]}
@@ -2026,6 +2084,7 @@ export default function App() {
         makeDownloadUrl={(file) => buildDownloadUrl(settings.apiBase, file)}
         onClear={() => replaceChats((current) => ({ ...current, [mode]: createInitialChats()[mode] }))}
         onInputChange={(value) => updateChat(mode, (current) => ({ ...current, input: value }))}
+        onResolveApproval={(approvalId, action, argumentsOverride) => resolveHitlApproval(CHAT_MODES[mode].sessionId, approvalId, action, argumentsOverride)}
         onRemoveFile={(index) => updateChat(mode, (current) => ({
           ...current,
           files: current.files.filter((_, currentIndex) => currentIndex !== index)
@@ -2290,6 +2349,10 @@ export default function App() {
                     promptPreview={promptPreview}
                     skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
                     skillLearningUserPrompt={draftSkillLearningUserPrompt}
+                    hitlEnabled={draftHitlEnabled}
+                    hitlDefaultAction={draftHitlDefaultAction}
+                    hitlTimeoutSeconds={draftHitlTimeoutSeconds}
+                    hitlRules={draftHitlRules}
                     temperature={draftTemperature}
                     topP={draftTopP}
                     onApiBaseChange={setDraftApiBase}
@@ -2321,6 +2384,10 @@ export default function App() {
                     }}
                     onSkillLearningSystemPromptChange={setDraftSkillLearningSystemPrompt}
                     onSkillLearningUserPromptChange={setDraftSkillLearningUserPrompt}
+                    onHitlEnabledChange={setDraftHitlEnabled}
+                    onHitlDefaultActionChange={setDraftHitlDefaultAction}
+                    onHitlTimeoutSecondsChange={setDraftHitlTimeoutSeconds}
+                    onHitlRulesChange={setDraftHitlRules}
                     onTestMcp={async () => {
                       try {
                         setMcpPreview((current) => ({ ...current, loading: true, error: "" }));
@@ -2357,6 +2424,10 @@ export default function App() {
                       setDraftMemoryMaintenanceUserPrompt(DEFAULT_SETTINGS.memoryMaintenanceUserPrompt);
                       setDraftSkillLearningSystemPrompt(DEFAULT_SETTINGS.skillLearningSystemPrompt);
                       setDraftSkillLearningUserPrompt(DEFAULT_SETTINGS.skillLearningUserPrompt);
+                      setDraftHitlEnabled(DEFAULT_SETTINGS.hitlEnabled);
+                      setDraftHitlDefaultAction(DEFAULT_SETTINGS.hitlDefaultAction);
+                      setDraftHitlTimeoutSeconds(DEFAULT_SETTINGS.hitlTimeoutSeconds);
+                      setDraftHitlRules(DEFAULT_SETTINGS.hitlRules);
                     }}
                     onSave={() => {
                       void (async () => {
@@ -2385,7 +2456,11 @@ export default function App() {
                             memoryMaintenanceSystemPrompt: draftMemoryMaintenanceSystemPrompt.trim(),
                             memoryMaintenanceUserPrompt: draftMemoryMaintenanceUserPrompt.trim(),
                             skillLearningSystemPrompt: draftSkillLearningSystemPrompt.trim(),
-                            skillLearningUserPrompt: draftSkillLearningUserPrompt.trim()
+                            skillLearningUserPrompt: draftSkillLearningUserPrompt.trim(),
+                            hitlEnabled: draftHitlEnabled,
+                            hitlDefaultAction: draftHitlDefaultAction,
+                            hitlTimeoutSeconds: normalizeOptionalNumericSetting(draftHitlTimeoutSeconds, "HITL Timeout", "int", 1),
+                            hitlRules: normalizeHitlRules(draftHitlRules)
                           };
                           setSettings(nextSettings);
                           const persisted = await persistSharedSettings(next, buildSharedFrontendSettings(nextSettings));
@@ -2436,12 +2511,13 @@ function ChatWorkspace(props: {
   onInputChange: (value: string) => void;
   onSelectFiles: (files: File[]) => void;
   onRemoveFile: (index: number) => void;
+  onResolveApproval: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void;
   onSend: () => void;
   onStop: () => void;
   onClear: () => void;
   makeDownloadUrl: (file: OutputFile) => string;
 }) {
-  const { chat, config, currentUserId, onClear, onInputChange, onRemoveFile, onSelectFiles, onSend, onStop, makeDownloadUrl } = props;
+  const { chat, config, currentUserId, onClear, onInputChange, onRemoveFile, onResolveApproval, onSelectFiles, onSend, onStop, makeDownloadUrl } = props;
   const threadEndRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const isComposingRef = useRef(false);
@@ -2628,6 +2704,7 @@ function ChatWorkspace(props: {
                 latestStreamingMessageId={latestStreamingMessageId}
                 latestStreamingReplyRef={latestStreamingReplyRef}
                 makeDownloadUrl={makeDownloadUrl}
+                onResolveApproval={onResolveApproval}
                 turn={turn}
               />
             )) : (
@@ -2867,7 +2944,7 @@ function describeFinishReason(finishReason: string) {
   }
 }
 
-function renderProcessItem(item: ProcessItem, index: number) {
+function renderProcessItem(item: ProcessItem, index: number, onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void) {
   if (isRecord(item) && item.event === "tool_use") {
     const title = typeof item.name === "string" && item.name.trim() ? item.name : "unknown";
     const argumentsText = typeof item.arguments === "string" ? item.arguments.trim() : "";
@@ -2896,8 +2973,61 @@ function renderProcessItem(item: ProcessItem, index: number) {
     );
   }
 
-  if (isRecord(item) && item.event === "steering") {
-    const message = typeof item.message === "string" && item.message.trim()
+
+  if (isRecord(item) && item.event === "approval_required") {
+    const approvalId = typeof item.approval_id === "string" ? item.approval_id : "";
+    const title = typeof item.title === "string" && item.title.trim() ? item.title.trim() : "需要人工确认";
+    const summary = typeof item.summary === "string" ? item.summary.trim() : "";
+    const risk = typeof item.risk_level === "string" ? item.risk_level : "medium";
+    const toolName = typeof item.tool_name === "string" ? item.tool_name : "unknown";
+    const argsText = JSON.stringify(item.arguments ?? {}, null, 2);
+    const handleModify = () => {
+      if (!approvalId || !onResolveApproval) {
+        return;
+      }
+      const raw = window.prompt("修改后的工具参数 JSON", argsText);
+      if (raw === null) {
+        return;
+      }
+      try {
+        onResolveApproval(approvalId, "modify", JSON.parse(raw));
+      } catch {
+        window.alert("参数必须是合法 JSON");
+      }
+    };
+    return (
+      <div className="process-item approval-required" key={`process-${index}`}>
+        <div className="process-item-header">
+          <span className="process-badge">HITL</span>
+          <strong>{title}</strong>
+        </div>
+        <div className="process-note">风险：{risk}；工具：{toolName}</div>
+        {summary ? <div className="process-note">{summary}</div> : null}
+        <pre>{argsText}</pre>
+        <div className="button-row hitl-actions">
+          <button className="button primary" disabled={!approvalId || !onResolveApproval} onClick={() => approvalId && onResolveApproval?.(approvalId, "approve")} type="button">批准执行</button>
+          <button className="button secondary" disabled={!approvalId || !onResolveApproval} onClick={handleModify} type="button">修改后批准</button>
+          <button className="button danger" disabled={!approvalId || !onResolveApproval} onClick={() => approvalId && onResolveApproval?.(approvalId, "reject")} type="button">拒绝</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (isRecord(item) && item.event === "approval_resolved") {
+    const approvalId = typeof item.approval_id === "string" ? item.approval_id : "";
+    const status = typeof item.status === "string" ? item.status : "unknown";
+    return (
+      <div className="process-item approval-resolved" key={`process-${index}`}>
+        <div className="process-item-header">
+          <span className="process-badge">HITL</span>
+          <strong>审批已处理 · {status}</strong>
+        </div>
+        <div className="process-note">{approvalId}</div>
+      </div>
+    );
+  }
+
+  if (isRecord(item) && item.event === "steering") {    const message = typeof item.message === "string" && item.message.trim()
       ? item.message.trim()
       : "收到新的 steering 消息";
     const skippedTools = Array.isArray(item.skipped_tools)
@@ -3006,7 +3136,8 @@ function renderProcessItem(item: ProcessItem, index: number) {
 function renderAssistantMessageContent(
   message: DisplayMessage,
   makeDownloadUrl: (file: OutputFile) => string,
-  streamingReplyRef?: MutableRefObject<HTMLDivElement | null>
+  streamingReplyRef?: MutableRefObject<HTMLDivElement | null>,
+  onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void
 ) {
   const downloads = collectDownloadFiles(message);
   const streamingText = stripThinkingContent(message.text);
@@ -3077,7 +3208,7 @@ function renderAssistantMessageContent(
           <summary><span>处理过程 ({message.processItems.length} 步)</span><span>展开</span></summary>
           <div className="fold-card-body">
             <div className="process-list">
-              {message.processItems.map((item, index) => renderProcessItem(item, index))}
+              {message.processItems.map((item, index) => renderProcessItem(item, index, onResolveApproval))}
             </div>
           </div>
         </details>
@@ -3091,8 +3222,9 @@ function ConversationTurnCard(props: {
   makeDownloadUrl: (file: OutputFile) => string;
   latestStreamingMessageId: string | null;
   latestStreamingReplyRef: MutableRefObject<HTMLDivElement | null>;
+  onResolveApproval?: (approvalId: string, action: "approve" | "reject" | "modify", argumentsOverride?: unknown) => void;
 }) {
-  const { turn, makeDownloadUrl, latestStreamingMessageId, latestStreamingReplyRef } = props;
+  const { turn, makeDownloadUrl, latestStreamingMessageId, latestStreamingReplyRef, onResolveApproval } = props;
 
   return (
     <article className="conversation-turn">
@@ -3112,7 +3244,8 @@ function ConversationTurnCard(props: {
             {renderAssistantMessageContent(
               turn.assistant,
               makeDownloadUrl,
-              turn.assistant.id === latestStreamingMessageId ? latestStreamingReplyRef : undefined
+              turn.assistant.id === latestStreamingMessageId ? latestStreamingReplyRef : undefined,
+              onResolveApproval
             )}
           </div>
         </section>
@@ -4540,6 +4673,10 @@ function SettingsWorkspace(props: {
   memoryMaintenanceUserPrompt: string;
   skillLearningSystemPrompt: string;
   skillLearningUserPrompt: string;
+  hitlEnabled: boolean;
+  hitlDefaultAction: HitlDefaultAction;
+  hitlTimeoutSeconds: string;
+  hitlRules: HitlRule[];
   onApiBaseChange: (value: string) => void;
   onAgentPromptOverrideChange: (value: string) => void;
   onAgentPromptAppendChange: (value: string) => void;
@@ -4562,6 +4699,10 @@ function SettingsWorkspace(props: {
   onMemoryMaintenanceUserPromptChange: (value: string) => void;
   onSkillLearningSystemPromptChange: (value: string) => void;
   onSkillLearningUserPromptChange: (value: string) => void;
+  onHitlEnabledChange: (value: boolean) => void;
+  onHitlDefaultActionChange: (value: HitlDefaultAction) => void;
+  onHitlTimeoutSecondsChange: (value: string) => void;
+  onHitlRulesChange: (value: HitlRule[]) => void;
   onCopyMcpServer: (server: McpServerPreview, mode: McpExposureMode) => void;
   onCopyVisibleMcpTools: (
     servers: Array<McpServerPreview & { tools: McpServerPreview["tools"] }>,
@@ -4595,6 +4736,10 @@ function SettingsWorkspace(props: {
     promptPreview,
     skillLearningSystemPrompt,
     skillLearningUserPrompt,
+    hitlEnabled,
+    hitlDefaultAction,
+    hitlTimeoutSeconds,
+    hitlRules,
     temperature,
     topP,
     onApiBaseChange,
@@ -4620,6 +4765,10 @@ function SettingsWorkspace(props: {
     onSave,
     onSkillLearningSystemPromptChange,
     onSkillLearningUserPromptChange,
+    onHitlEnabledChange,
+    onHitlDefaultActionChange,
+    onHitlTimeoutSecondsChange,
+    onHitlRulesChange,
     onTestMcp,
     onTemperatureChange,
     onTest,
@@ -4708,8 +4857,18 @@ function SettingsWorkspace(props: {
     onMcpLazyUrlsChange(nextLazy);
   };
 
-  const toggleServerCollapsed = (endpoint: string) => {
-    setCollapsedServers((current) => ({
+
+  const updateHitlRule = (index: number, patch: Partial<HitlRule>) => {
+    onHitlRulesChange(normalizeHitlRules(hitlRules.map((rule, ruleIndex) => ruleIndex === index ? { ...rule, ...patch } : rule)));
+  };
+  const addHitlRule = () => {
+    onHitlRulesChange([...hitlRules, { tool: "", toolPrefix: null, requireApproval: true, riskLevel: "medium" }]);
+  };
+  const removeHitlRule = (index: number) => {
+    onHitlRulesChange(hitlRules.filter((_, ruleIndex) => ruleIndex !== index));
+  };
+
+  const toggleServerCollapsed = (endpoint: string) => {    setCollapsedServers((current) => ({
       ...current,
       [endpoint]: !current[endpoint]
     }));
@@ -4848,6 +5007,66 @@ function SettingsWorkspace(props: {
           <textarea className="prompt-textarea" onChange={(event) => onSkillLearningUserPromptChange(event.target.value)} placeholder="覆盖更新私有 skills 时使用的 user prompt 模板" value={skillLearningUserPrompt} />
           <small>支持占位符：{"{source_scope}"}、{"{skill_path}"}、{"{skill_name}"}、{"{skill_body_len}"}、{"{user_message}"}、{"{assistant_reply}"}。</small>
         </label>
+
+        <div className="section-head">
+          <div>
+            <h3>人在回路 / HITL</h3>
+            <span>配置哪些工具或工具前缀需要人工确认；命中规则后 agent 会暂停等待批准、拒绝或修改参数。</span>
+          </div>
+        </div>
+        <div className="form-grid">
+          <label className="field checkbox-field">
+            <span>启用 HITL</span>
+            <input checked={hitlEnabled} onChange={(event) => onHitlEnabledChange(event.target.checked)} type="checkbox" />
+            <small>关闭时所有工具按原逻辑自动执行。</small>
+          </label>
+          <label className="field">
+            <span>默认动作</span>
+            <select onChange={(event) => onHitlDefaultActionChange(event.target.value as HitlDefaultAction)} value={hitlDefaultAction}>
+              <option value="auto">未命中规则：自动执行</option>
+              <option value="require_approval">未命中规则：也需要确认</option>
+              <option value="reject">未命中规则：直接拒绝</option>
+            </select>
+            <small>规则按顺序匹配；精确工具名和前缀都支持。</small>
+          </label>
+          <label className="field">
+            <span>审批超时秒数</span>
+            <input onChange={(event) => onHitlTimeoutSecondsChange(event.target.value)} placeholder="300" value={hitlTimeoutSeconds} />
+            <small>超时后该工具调用不会执行，并把超时结果返回给模型。</small>
+          </label>
+        </div>
+        <div className="hitl-rule-list">
+          {hitlRules.map((rule, index) => (
+            <div className="hitl-rule-row" key={`hitl-rule-${index}`}>
+              <label className="field">
+                <span>工具名</span>
+                <input onChange={(event) => updateHitlRule(index, { tool: event.target.value, toolPrefix: null })} placeholder="write_file" value={rule.tool || ""} />
+              </label>
+              <label className="field">
+                <span>或工具前缀</span>
+                <input onChange={(event) => updateHitlRule(index, { toolPrefix: event.target.value, tool: null })} placeholder="mcp_" value={rule.toolPrefix || ""} />
+              </label>
+              <label className="field">
+                <span>动作</span>
+                <select onChange={(event) => updateHitlRule(index, { requireApproval: event.target.value === "approve" })} value={rule.requireApproval ? "approve" : "auto"}>
+                  <option value="approve">需要确认</option>
+                  <option value="auto">自动执行</option>
+                </select>
+              </label>
+              <label className="field">
+                <span>风险等级</span>
+                <select onChange={(event) => updateHitlRule(index, { riskLevel: event.target.value as HitlRiskLevel })} value={rule.riskLevel}>
+                  <option value="low">低</option>
+                  <option value="medium">中</option>
+                  <option value="high">高</option>
+                </select>
+              </label>
+              <button className="button ghost" onClick={() => removeHitlRule(index)} type="button">删除</button>
+            </div>
+          ))}
+          <button className="button secondary" onClick={addHitlRule} type="button">添加 HITL 规则</button>
+        </div>
+
         <div className="section-head">
           <div>
             <h3>LLM 参数覆盖</h3>
@@ -4881,7 +5100,7 @@ function SettingsWorkspace(props: {
             <small>控制采样截断范围，通常和 temperature 二选一重点调节。</small>
           </label>
         </div>
-        <div className="form-actions">
+        <div className="form-actions settings-primary-actions">
           <div className="button-row">
             <button className="button secondary" onClick={onTest} type="button">测试连接</button>
             <button className="button secondary" onClick={onTestMcp} type="button">测试 MCP</button>

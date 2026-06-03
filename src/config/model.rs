@@ -1,5 +1,8 @@
 use serde::Deserialize;
 
+use crate::domain::hitl::models::HitlRiskLevel;
+use crate::domain::hitl::policy::{HitlDefaultAction, HitlPolicyRule};
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {
@@ -9,6 +12,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
+    pub hitl: HitlConfig,
 }
 
 impl Default for AppConfig {
@@ -20,14 +24,23 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             memory: MemoryConfig::default(),
             skills: SkillsConfig::default(),
+            hitl: HitlConfig::default(),
         }
     }
+}
+
+pub fn default_agent_system_prompt() -> String {
+    "You are a coding agent at {repo_root}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable.
+
+IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be written under /app/outputs/ inside the container. In this workspace that maps to {outputs_dir}. Do not place downloadable deliverables in uploads, memory files, or other directories."
+        .to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AgentConfig {
     pub model_id: String,
+    pub system_prompt: String,
     pub max_tokens: u32,
     pub base_url: String,
     pub api_key: String,
@@ -36,12 +49,16 @@ pub struct AgentConfig {
     pub max_iterations: usize,
     pub subagent_max_iterations: usize,
     pub auto_compact_token_threshold: usize,
+    pub tool_result_size_chars: usize,
+    pub tool_turn_budget_chars: usize,
+    pub tool_result_preview_chars: usize,
 }
 
 impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             model_id: "qwen2.5-72b-instruct".to_string(),
+            system_prompt: default_agent_system_prompt(),
             max_tokens: 8_000,
             base_url: "http://localhost:8000/v1".to_string(),
             api_key: "EMPTY".to_string(),
@@ -50,6 +67,42 @@ impl Default for AgentConfig {
             max_iterations: 8,
             subagent_max_iterations: 30,
             auto_compact_token_threshold: 60_000,
+            tool_result_size_chars: 100_000,
+            tool_turn_budget_chars: 200_000,
+            tool_result_preview_chars: 1_500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct HitlConfig {
+    pub enabled: bool,
+    pub default_action: HitlDefaultAction,
+    pub timeout_seconds: u64,
+    pub rules: Vec<HitlPolicyRule>,
+}
+
+impl Default for HitlConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            default_action: HitlDefaultAction::Auto,
+            timeout_seconds: 300,
+            rules: vec![
+                HitlPolicyRule {
+                    tool: Some("write_file".to_string()),
+                    require_approval: true,
+                    risk_level: HitlRiskLevel::High,
+                    ..HitlPolicyRule::default()
+                },
+                HitlPolicyRule {
+                    tool: Some("edit_file".to_string()),
+                    require_approval: true,
+                    risk_level: HitlRiskLevel::High,
+                    ..HitlPolicyRule::default()
+                },
+            ],
         }
     }
 }

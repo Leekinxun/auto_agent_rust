@@ -15,9 +15,12 @@ use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse, SteeringResponse
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
-    AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, LlmOverrides,
-    McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
+    AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, HitlOverrides,
+    LlmOverrides, McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
 };
+use crate::domain::hitl::models::HitlDecisionResolution;
+use crate::domain::hitl::policy::HitlDefaultAction;
+use crate::domain::hitl::service::write_hitl_resolution;
 use crate::domain::settings::{
     SharedFrontendSettings, UserMcpPermissions, UserSkillPermissions,
     load_shared_frontend_settings, save_shared_frontend_settings,
@@ -33,6 +36,22 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/session/{session_id}/steering",
             post(agent_session_steering).options(agent_session_steering_options),
+        )
+        .route(
+            "/session/{session_id}/approvals",
+            get(list_session_approvals),
+        )
+        .route(
+            "/session/{session_id}/approvals/{approval_id}/approve",
+            post(approve_session_approval),
+        )
+        .route(
+            "/session/{session_id}/approvals/{approval_id}/reject",
+            post(reject_session_approval),
+        )
+        .route(
+            "/session/{session_id}/approvals/{approval_id}/modify",
+            post(modify_session_approval),
         )
         .route("/settings/prompts", get(agent_prompt_settings))
         .route("/settings/mcp", get(agent_mcp_settings))
@@ -61,6 +80,13 @@ struct McpSettingsQuery {
 #[derive(Debug, Deserialize)]
 struct SteeringRequest {
     content: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct HitlResolveRequest {
+    resolved_by: String,
+    note: Option<String>,
+    arguments: Option<serde_json::Value>,
 }
 
 async fn agent_system_prompt(
@@ -192,6 +218,71 @@ async fn agent_memory_stream(
     build_stream_response(state, request, ChatMode::Memory).await
 }
 
+async fn list_session_approvals(
+    Path(session_id): Path<String>,
+    State(state): State<SharedState>,
+) -> ApiResult<Json<Vec<crate::domain::hitl::models::HitlDecisionRequest>>> {
+    let session = state.session_service.get_or_create(&session_id)?;
+    Ok(Json(session.list_pending_hitl()))
+}
+
+async fn approve_session_approval(
+    Path((session_id, approval_id)): Path<(String, String)>,
+    State(state): State<SharedState>,
+    Json(payload): Json<HitlResolveRequest>,
+) -> ApiResult<Json<HitlDecisionResolution>> {
+    resolve_session_approval(session_id, approval_id, state, payload, "approve").await
+}
+
+async fn reject_session_approval(
+    Path((session_id, approval_id)): Path<(String, String)>,
+    State(state): State<SharedState>,
+    Json(payload): Json<HitlResolveRequest>,
+) -> ApiResult<Json<HitlDecisionResolution>> {
+    resolve_session_approval(session_id, approval_id, state, payload, "reject").await
+}
+
+async fn modify_session_approval(
+    Path((session_id, approval_id)): Path<(String, String)>,
+    State(state): State<SharedState>,
+    Json(payload): Json<HitlResolveRequest>,
+) -> ApiResult<Json<HitlDecisionResolution>> {
+    resolve_session_approval(session_id, approval_id, state, payload, "modify").await
+}
+
+async fn resolve_session_approval(
+    session_id: String,
+    approval_id: String,
+    state: SharedState,
+    payload: HitlResolveRequest,
+    action: &str,
+) -> ApiResult<Json<HitlDecisionResolution>> {
+    let resolved_by = payload.resolved_by.trim().to_string();
+    if resolved_by.is_empty() {
+        return Err(ApiError::bad_request("resolved_by 不能为空"));
+    }
+    let session = state.session_service.get_or_create(&session_id)?;
+    let resolution = match action {
+        "approve" => HitlDecisionResolution::approved(approval_id, resolved_by, payload.note),
+        "reject" => HitlDecisionResolution::rejected(approval_id, resolved_by, payload.note),
+        "modify" => HitlDecisionResolution::modified(
+            approval_id,
+            resolved_by,
+            payload.note,
+            payload.arguments.unwrap_or_else(|| serde_json::json!({})),
+        ),
+        _ => return Err(ApiError::bad_request("unknown HITL action")),
+    };
+    if !session.resolve_hitl(resolution.clone()) {
+        return Err(ApiError::not_found(format!(
+            "approval not found or already resolved: {}",
+            resolution.approval_id
+        )));
+    }
+    write_hitl_resolution(&state.repo_root, &resolution).await?;
+    Ok(Json(resolution))
+}
+
 async fn agent_session_steering(
     Path(session_id): Path<String>,
     State(state): State<SharedState>,
@@ -312,6 +403,10 @@ async fn parse_chat_multipart(
     let mut mcp_denied_tools_json: Option<String> = None;
     let mut skill_allowed_names_json: Option<String> = None;
     let mut skill_denied_names_json: Option<String> = None;
+    let mut hitl_enabled: Option<bool> = None;
+    let mut hitl_default_action: Option<HitlDefaultAction> = None;
+    let mut hitl_timeout_seconds: Option<u64> = None;
+    let mut hitl_rules_json: Option<String> = None;
     let mut files = Vec::new();
 
     while let Some(field) = multipart.next_field().await.map_err(anyhow::Error::from)? {
@@ -352,6 +447,14 @@ async fn parse_chat_multipart(
             "mcp_denied_tools" => mcp_denied_tools_json = non_empty(value),
             "skill_allowed_names" => skill_allowed_names_json = non_empty(value),
             "skill_denied_names" => skill_denied_names_json = non_empty(value),
+            "hitl_enabled" => hitl_enabled = Some(parse_bool_field(&value, "hitl_enabled")?),
+            "hitl_default_action" => hitl_default_action = Some(parse_hitl_default_action(&value)?),
+            "hitl_timeout_seconds" => {
+                hitl_timeout_seconds = Some(
+                    parse_optional_number::<u64>(&value, "hitl_timeout_seconds")?.unwrap_or(300),
+                )
+            }
+            "hitl_rules" => hitl_rules_json = non_empty(value),
             _ => {}
         }
     }
@@ -415,6 +518,33 @@ async fn parse_chat_multipart(
         skill_denied_names = user_skill_permissions.denied_skills;
     }
 
+    let settings = load_shared_frontend_settings(&state.repo_root).await?;
+    let hitl_timeout_raw = hitl_timeout_seconds
+        .or_else(|| settings.hitl_timeout_seconds.parse::<u64>().ok())
+        .unwrap_or(state.config.hitl.timeout_seconds)
+        .max(1);
+    let hitl_rules = if let Some(raw) = hitl_rules_json.as_deref() {
+        parse_hitl_rules(raw)?
+    } else if !settings.hitl_rules.is_empty() {
+        settings.hitl_rules.clone()
+    } else {
+        state.config.hitl.rules.clone()
+    };
+    let hitl_overrides = HitlOverrides {
+        enabled: hitl_enabled.unwrap_or(settings.hitl_enabled || state.config.hitl.enabled),
+        default_action: hitl_default_action
+            .or_else(|| {
+                if settings.hitl_enabled {
+                    Some(settings.hitl_default_action.clone())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| state.config.hitl.default_action.clone()),
+        timeout_seconds: hitl_timeout_raw,
+        rules: hitl_rules,
+    };
+
     Ok(ChatRequest {
         message,
         history,
@@ -449,6 +579,7 @@ async fn parse_chat_multipart(
             allowed_skills: skill_allowed_names,
             denied_skills: skill_denied_names,
         },
+        hitl_overrides,
     })
 }
 
@@ -525,6 +656,28 @@ fn non_empty(value: String) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn parse_bool_field(value: &str, field: &str) -> ApiResult<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Ok(true),
+        "0" | "false" | "no" | "off" => Ok(false),
+        _ => Err(ApiError::bad_request(format!("{field} 必须是布尔值"))),
+    }
+}
+
+fn parse_hitl_default_action(value: &str) -> ApiResult<HitlDefaultAction> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(HitlDefaultAction::Auto),
+        "require_approval" => Ok(HitlDefaultAction::RequireApproval),
+        "reject" => Ok(HitlDefaultAction::Reject),
+        _ => Err(ApiError::bad_request("hitl_default_action 不合法")),
+    }
+}
+
+fn parse_hitl_rules(value: &str) -> ApiResult<Vec<crate::domain::hitl::policy::HitlPolicyRule>> {
+    serde_json::from_str::<Vec<crate::domain::hitl::policy::HitlPolicyRule>>(value)
+        .map_err(|_| ApiError::bad_request("hitl_rules 必须是合法 JSON 数组"))
 }
 
 fn parse_optional_number<T>(raw: &str, label: &str) -> ApiResult<Option<T>>
@@ -622,6 +775,33 @@ fn chat_event_to_sse(event: ChatEvent) -> Event {
         } => sse_event(
             "steering",
             serde_json::json!({ "message": message, "skipped_tools": skipped_tools }),
+        ),
+        ChatEvent::ApprovalRequired {
+            approval_id,
+            kind,
+            title,
+            summary,
+            risk_level,
+            tool_name,
+            arguments,
+        } => sse_event(
+            "approval_required",
+            serde_json::json!({
+                "approval_id": approval_id,
+                "kind": kind,
+                "title": title,
+                "summary": summary,
+                "risk_level": risk_level,
+                "tool_name": tool_name,
+                "arguments": arguments,
+            }),
+        ),
+        ChatEvent::ApprovalResolved {
+            approval_id,
+            status,
+        } => sse_event(
+            "approval_resolved",
+            serde_json::json!({ "approval_id": approval_id, "status": status }),
         ),
         ChatEvent::FilesUploaded(files) => {
             sse_event("files_uploaded", serde_json::json!({ "files": files }))

@@ -11,6 +11,8 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, ensure};
+
+use crate::config::model::AppConfig;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -26,8 +28,6 @@ pub const SKILL_LEARNING_SYSTEM_PATH: &str = "harness/skills/learning_system.md"
 pub const SKILL_LEARNING_USER_TEMPLATE_PATH: &str = "harness/skills/learning_user_template.md";
 pub const TOOL_DESCRIPTIONS_PATH: &str = "harness/tools/descriptions.json";
 pub const MIDDLEWARE_MESSAGES_PATH: &str = "harness/middleware/messages.json";
-
-const DEFAULT_SYSTEM_BASE_TEMPLATE: &str = "You are a coding agent at {repo_root}. Use task + worktree tools for multi-task work. MCP tools (prefixed with mcp_) may be available when the MCP server is reachable. IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be written under /app/outputs/ inside the container. In this workspace that maps to {outputs_dir}. Do not place downloadable deliverables in uploads, memory files, or other directories.";
 
 const DEFAULT_SUBAGENT_SHARED_PROMPT: &str = "You are an isolated subagent. You do not inherit the parent agent's conversation history, session state, memory files, or loaded skills unless they are explicitly included in the task prompt or tool outputs.";
 
@@ -72,6 +72,13 @@ impl PromptSource {
         Self {
             kind: PromptSourceKind::File,
             path: Some(relative_path.to_string()),
+        }
+    }
+
+    pub fn config(path: &str) -> Self {
+        Self {
+            kind: PromptSourceKind::File,
+            path: Some(format!("config/config.yaml:{path}")),
         }
     }
 
@@ -140,17 +147,13 @@ pub struct HarnessAssets {
 }
 
 impl HarnessAssets {
-    pub fn load(repo_root: &Path) -> Result<Self> {
+    pub fn load(repo_root: &Path, config: &AppConfig) -> Result<Self> {
         let (tool_descriptions, tool_descriptions_source) =
             read_optional_tool_descriptions(repo_root)?;
         let (middleware_messages, middleware_messages_source) =
             read_optional_middleware_messages(repo_root)?;
         Ok(Self {
-            system_base_template: read_optional_prompt(
-                repo_root,
-                SYSTEM_BASE_PATH,
-                DEFAULT_SYSTEM_BASE_TEMPLATE,
-            )?,
+            system_base_template: load_system_base_prompt(repo_root, config)?,
             subagent_shared_prompt: read_optional_prompt(
                 repo_root,
                 SUBAGENT_SHARED_PATH,
@@ -315,6 +318,22 @@ pub fn resolve_repo_prompt_source(repo_root: &Path, relative_path: &str) -> Prom
     }
 }
 
+fn load_system_base_prompt(repo_root: &Path, config: &AppConfig) -> Result<PromptAsset> {
+    let configured = config.agent.system_prompt.trim();
+    if !configured.is_empty() {
+        return Ok(PromptAsset {
+            content: config.agent.system_prompt.clone(),
+            source: PromptSource::config("agent.system_prompt"),
+        });
+    }
+
+    read_optional_prompt(
+        repo_root,
+        SYSTEM_BASE_PATH,
+        &crate::config::model::default_agent_system_prompt(),
+    )
+}
+
 fn read_optional_prompt(
     repo_root: &Path,
     relative_path: &str,
@@ -469,8 +488,10 @@ mod tests {
             "recover {finish_reason}",
         )
         .unwrap();
+        let mut config = crate::config::model::AppConfig::default();
+        config.agent.system_prompt.clear();
 
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
         let base = harness.render_system_base(&repo.root);
         assert!(base.contains(&format!("repo={}", repo.root.display())));
         assert!(base.contains(&format!("outputs={}", repo.root.join("outputs").display())));
@@ -483,7 +504,8 @@ mod tests {
     #[test]
     fn composes_shared_and_role_specific_subagent_guidance() {
         let repo = TestRepo::new();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let config = crate::config::model::AppConfig::default();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
 
         let explore = harness.render_subagent_system("Explore");
         let general = harness.render_subagent_system("general-purpose");
@@ -506,8 +528,9 @@ mod tests {
 }"#,
         )
         .unwrap();
+        let config = crate::config::model::AppConfig::default();
 
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
         let mut tools = vec![
             serde_json::json!({
                 "type": "function",
@@ -543,8 +566,9 @@ mod tests {
 }"#,
         )
         .unwrap();
+        let config = crate::config::model::AppConfig::default();
 
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
 
         assert_eq!(harness.steering_ack(), "Custom steering ack");
         assert_eq!(

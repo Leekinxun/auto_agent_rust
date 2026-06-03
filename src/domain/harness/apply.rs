@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
 
@@ -12,7 +12,7 @@ use super::{
     FINAL_ANSWER_RECOVERY_PATH, HarnessAssets, MEMORY_MAINTENANCE_SYSTEM_PATH,
     MEMORY_MAINTENANCE_USER_TEMPLATE_PATH, MIDDLEWARE_MESSAGES_PATH, SKILL_LEARNING_SYSTEM_PATH,
     SKILL_LEARNING_USER_TEMPLATE_PATH, SUBAGENT_EXPLORE_PATH, SUBAGENT_GENERAL_PATH,
-    SUBAGENT_SHARED_PATH, SYSTEM_BASE_PATH, TOOL_DESCRIPTIONS_PATH,
+    SUBAGENT_SHARED_PATH, TOOL_DESCRIPTIONS_PATH,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,7 +64,7 @@ pub struct HarnessApplyExecution {
 
 pub fn supported_surface_path(key: &str) -> Option<&'static str> {
     match key {
-        "system.base" => Some(SYSTEM_BASE_PATH),
+        "system.base" => Some("config/config.yaml:agent.system_prompt"),
         "subagents.shared" => Some(SUBAGENT_SHARED_PATH),
         "subagents.explore" => Some(SUBAGENT_EXPLORE_PATH),
         "subagents.general_purpose" => Some(SUBAGENT_GENERAL_PATH),
@@ -163,13 +163,7 @@ pub fn apply_harness_edits(
     let snapshot_before = preview.snapshot_before.clone();
 
     for surface in &preview.surfaces {
-        let path = repo_root.join(&surface.path);
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
-        std::fs::write(&path, &surface.after_content)
-            .with_context(|| format!("failed to write {}", path.display()))?;
+        write_surface(repo_root, surface)?;
     }
 
     let config_path = repo_root.join("config").join("config.yaml");
@@ -178,7 +172,7 @@ pub fn apply_harness_edits(
     } else {
         config.clone()
     };
-    let refreshed_harness = HarnessAssets::load(repo_root)?;
+    let refreshed_harness = HarnessAssets::load(repo_root, &refreshed_config)?;
     let snapshot_after = build_harness_snapshot(repo_root, &refreshed_config, &refreshed_harness)?;
 
     let updated_surfaces = preview
@@ -198,6 +192,61 @@ pub fn apply_harness_edits(
         preview,
         updated_surfaces,
     })
+}
+
+fn write_surface(repo_root: &Path, surface: &HarnessPreviewSurface) -> Result<()> {
+    if surface.surface_key == "system.base" {
+        return write_agent_system_prompt(repo_root, &surface.after_content);
+    }
+
+    let path = repo_root.join(&surface.path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&path, &surface.after_content)
+        .with_context(|| format!("failed to write {}", path.display()))?;
+    Ok(())
+}
+
+fn write_agent_system_prompt(repo_root: &Path, content: &str) -> Result<()> {
+    let config_path = repo_root.join("config").join("config.yaml");
+    let mut yaml = if config_path.exists() {
+        let raw = std::fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?;
+        serde_yaml::from_str::<serde_yaml::Value>(&raw)
+            .with_context(|| format!("invalid yaml in {}", config_path.display()))?
+    } else {
+        serde_yaml::Value::Mapping(Default::default())
+    };
+    let Some(root) = yaml.as_mapping_mut() else {
+        bail!("config/config.yaml must be a YAML mapping");
+    };
+    let agent_key = serde_yaml::Value::String("agent".to_string());
+    if !root.contains_key(&agent_key) {
+        root.insert(
+            agent_key.clone(),
+            serde_yaml::Value::Mapping(Default::default()),
+        );
+    }
+    let Some(agent) = root
+        .get_mut(&agent_key)
+        .and_then(|value| value.as_mapping_mut())
+    else {
+        bail!("config/config.yaml agent must be a YAML mapping");
+    };
+    agent.insert(
+        serde_yaml::Value::String("system_prompt".to_string()),
+        serde_yaml::Value::String(content.to_string()),
+    );
+    let encoded = serde_yaml::to_string(&yaml).context("failed to encode config/config.yaml")?;
+    if let Some(parent) = config_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    std::fs::write(&config_path, encoded)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+    Ok(())
 }
 
 fn normalize_edits(edits: &[HarnessSurfaceEdit]) -> Result<Vec<HarnessSurfaceEdit>> {
@@ -307,7 +356,7 @@ mod tests {
     fn knows_supported_surface_paths() {
         assert_eq!(
             supported_surface_path("system.base"),
-            Some("harness/system/base.md")
+            Some("config/config.yaml:agent.system_prompt")
         );
         assert!(supported_surface_path("runtime.policy.self_evolution").is_none());
     }
@@ -316,7 +365,7 @@ mod tests {
     fn previews_supported_surface_edits_with_diff_metadata() {
         let repo = TestRepo::new();
         let config = AppConfig::default();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
 
         let preview = preview_harness_edits(
             &repo.root,
@@ -340,14 +389,17 @@ mod tests {
         assert_eq!(preview.surfaces[0].surface_key, "system.base");
         assert!(preview.surfaces[0].changed);
         assert_eq!(preview.surfaces[0].after_lines, 2);
-        assert_eq!(preview.surfaces[0].path, "harness/system/base.md");
+        assert_eq!(
+            preview.surfaces[0].path,
+            "config/config.yaml:agent.system_prompt"
+        );
     }
 
     #[test]
     fn applies_supported_surface_edits_and_updates_snapshot() {
         let repo = TestRepo::new();
         let config = AppConfig::default();
-        let harness = HarnessAssets::load(&repo.root).unwrap();
+        let harness = HarnessAssets::load(&repo.root, &config).unwrap();
         let result = apply_harness_edits(
             &repo.root,
             &config,
@@ -378,7 +430,10 @@ mod tests {
         assert_eq!(result.preview.changed_surface_count, 2);
         assert_eq!(result.updated_surfaces.len(), 2);
         assert_eq!(
-            fs::read_to_string(repo.root.join("harness/system/base.md")).unwrap(),
+            crate::config::loader::load_config(&repo.root)
+                .unwrap()
+                .agent
+                .system_prompt,
             "custom base"
         );
         assert!(

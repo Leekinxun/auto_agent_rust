@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use serde_json::{Map, Value, json};
+use tokio::sync::oneshot;
+use tokio::time::{Duration, timeout};
+
+use crate::domain::hitl::models::{HitlDecisionRequest, HitlDecisionResolution};
 
 use crate::domain::memory::models::UserMemorySnapshot;
 use crate::domain::session::background::{BackgroundManager, BackgroundNotification};
@@ -33,6 +37,8 @@ pub struct SessionContext {
     active_run_generation: Arc<Mutex<Option<u64>>>,
     run_generation_counter: Arc<AtomicU64>,
     prompt_memory_snapshots: Arc<Mutex<HashMap<String, UserMemorySnapshot>>>,
+    hitl_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<HitlDecisionResolution>>>>,
+    hitl_pending: Arc<Mutex<HashMap<String, HitlDecisionRequest>>>,
 }
 
 impl SessionContext {
@@ -56,7 +62,78 @@ impl SessionContext {
             active_run_generation: Arc::new(Mutex::new(None)),
             run_generation_counter: Arc::new(AtomicU64::new(1)),
             prompt_memory_snapshots: Arc::new(Mutex::new(HashMap::new())),
+            hitl_waiters: Arc::new(Mutex::new(HashMap::new())),
+            hitl_pending: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    pub fn register_hitl_request(
+        &self,
+        request: HitlDecisionRequest,
+    ) -> oneshot::Receiver<HitlDecisionResolution> {
+        let approval_id = request.approval_id.clone();
+        let (tx, rx) = oneshot::channel();
+        self.hitl_pending
+            .lock()
+            .expect("hitl pending lock poisoned")
+            .insert(approval_id.clone(), request);
+        self.hitl_waiters
+            .lock()
+            .expect("hitl waiters lock poisoned")
+            .insert(approval_id, tx);
+        rx
+    }
+
+    pub fn list_pending_hitl(&self) -> Vec<HitlDecisionRequest> {
+        let mut values = self
+            .hitl_pending
+            .lock()
+            .expect("hitl pending lock poisoned")
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        values.sort_by(|left, right| left.created_at_ms.cmp(&right.created_at_ms));
+        values
+    }
+
+    pub fn resolve_hitl(&self, resolution: HitlDecisionResolution) -> bool {
+        self.hitl_pending
+            .lock()
+            .expect("hitl pending lock poisoned")
+            .remove(&resolution.approval_id);
+        let sender = self
+            .hitl_waiters
+            .lock()
+            .expect("hitl waiters lock poisoned")
+            .remove(&resolution.approval_id);
+        if let Some(sender) = sender {
+            let _ = sender.send(resolution);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub async fn wait_hitl_resolution(
+        &self,
+        approval_id: &str,
+        rx: oneshot::Receiver<HitlDecisionResolution>,
+        timeout_seconds: u64,
+    ) -> HitlDecisionResolution {
+        match timeout(Duration::from_secs(timeout_seconds.max(1)), rx).await {
+            Ok(Ok(resolution)) => resolution,
+            Ok(Err(_)) | Err(_) => {
+                self.hitl_pending
+                    .lock()
+                    .expect("hitl pending lock poisoned")
+                    .remove(approval_id);
+                self.hitl_waiters
+                    .lock()
+                    .expect("hitl waiters lock poisoned")
+                    .remove(approval_id);
+                HitlDecisionResolution::expired(approval_id.to_string())
+            }
+        }
     }
 
     pub fn update_todos(&self, items: Vec<TodoItem>) -> Result<String> {
