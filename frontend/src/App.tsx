@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import type {
   AppSettings,
@@ -183,6 +183,7 @@ const SIDEBAR_COLLAPSED_KEY = "auto_claude_code_frontend_sidebar_collapsed";
 const STREAM_REVEAL_INTERVAL_MS = 16;
 const HEALTH_RECHECK_INTERVAL_MS = 15000;
 const MCP_HEALTH_CACHE_MS = 60000;
+const EMPTY_PERMISSION_ALLOWLIST = "__none_selected__";
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160;
 const SCROLL_TO_BOTTOM_BUTTON_THRESHOLD_PX = 320;
 const STREAMING_REPLY_BOTTOM_THRESHOLD_PX = 24;
@@ -774,6 +775,7 @@ export default function App() {
     error: "",
     servers: []
   });
+  const [settingsSkillOptions, setSettingsSkillOptions] = useState<SkillItem[]>([]);
   const [harnessWorkspace, setHarnessWorkspace] = useState<HarnessWorkspaceState>({
     loading: false,
     savingDraftId: null,
@@ -961,7 +963,7 @@ export default function App() {
       draftMcpBaseUrls,
       draftMcpDisabledUrls,
       draftMcpLazyUrls,
-      draftMcpUserPermissions,
+      [],
       draftMemoryUserId
     )
       .then((data) => {
@@ -988,7 +990,30 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls, draftMcpUserPermissions, draftMemoryUserId]);
+  }, [currentView, draftApiBase, draftMcpConfigPath, draftMcpBaseUrls, draftMcpDisabledUrls, draftMcpLazyUrls, draftMemoryUserId]);
+
+  useEffect(() => {
+    if (currentView !== "settings") {
+      return;
+    }
+
+    let cancelled = false;
+    void fetchSkillOptions(draftApiBase, draftMemoryUserId)
+      .then((items) => {
+        if (!cancelled) {
+          setSettingsSkillOptions(items);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSettingsSkillOptions([]);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, draftApiBase, draftMemoryUserId]);
 
   useEffect(() => {
     if (currentView === "skills") {
@@ -1147,7 +1172,7 @@ export default function App() {
       draftMcpBaseUrls,
       draftMcpDisabledUrls,
       draftMcpLazyUrls,
-      draftMcpUserPermissions,
+      [],
       draftMemoryUserId
     );
     const servers = normalizeMcpPreviewServers(data.servers);
@@ -2349,6 +2374,7 @@ export default function App() {
                     mcpLazyUrls={draftMcpLazyUrls}
                     mcpUserPermissions={draftMcpUserPermissions}
                     skillUserPermissions={draftSkillUserPermissions}
+                    skillOptions={settingsSkillOptions}
                     modelId={draftModelId}
                     promptPreview={promptPreview}
                     skillLearningSystemPrompt={draftSkillLearningSystemPrompt}
@@ -4733,6 +4759,7 @@ function SettingsWorkspace(props: {
   mcpLazyUrls: string[];
   mcpUserPermissions: AppSettings["mcpUserPermissions"];
   skillUserPermissions: AppSettings["skillUserPermissions"];
+  skillOptions: SkillItem[];
   modelId: string;
   promptPreview: PromptPreviewState;
   temperature: string;
@@ -4802,6 +4829,7 @@ function SettingsWorkspace(props: {
     mcpLazyUrls,
     mcpUserPermissions,
     skillUserPermissions,
+    skillOptions,
     modelId,
     promptPreview,
     skillLearningSystemPrompt,
@@ -4864,41 +4892,6 @@ function SettingsWorkspace(props: {
   const visibleToolCount = visibleServers.reduce((sum, server) => sum + server.tools.length, 0);
 
 
-  const permissionListToText = (items: string[]) => items.join("\n");
-  const updateMcpPermission = (userId: string, field: "allowedTools" | "deniedTools", rawValue: string) => {
-    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
-    const nextValues = normalizeStringList(rawValue.split(/\r?\n|,/));
-    const existing = mcpUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
-      userId: normalizedUserId,
-      allowedTools: [],
-      deniedTools: []
-    };
-    const next = {
-      ...existing,
-      [field]: nextValues
-    };
-    onMcpUserPermissionsChange(normalizeUserMcpPermissions([
-      ...mcpUserPermissions.filter((item) => item.userId !== normalizedUserId),
-      next
-    ]));
-  };
-  const updateSkillPermission = (userId: string, field: "allowedSkills" | "deniedSkills", rawValue: string) => {
-    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
-    const nextValues = normalizeStringList(rawValue.split(/\r?\n|,/));
-    const existing = skillUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
-      userId: normalizedUserId,
-      allowedSkills: [],
-      deniedSkills: []
-    };
-    const next = {
-      ...existing,
-      [field]: nextValues
-    };
-    onSkillUserPermissionsChange(normalizeUserSkillPermissions([
-      ...skillUserPermissions.filter((item) => item.userId !== normalizedUserId),
-      next
-    ]));
-  };
   const currentPermissionUserId = memoryUserId.trim() || DEFAULT_MEMORY_USER_ID;
   const currentMcpPermission = mcpUserPermissions.find((item) => item.userId === currentPermissionUserId) ?? {
     userId: currentPermissionUserId,
@@ -4909,6 +4902,118 @@ function SettingsWorkspace(props: {
     userId: currentPermissionUserId,
     allowedSkills: [],
     deniedSkills: []
+  };
+
+  const mcpPermissionServers = useMemo(() => mcpPreview.servers.map((server) => ({
+    endpoint: server.endpoint,
+    endpointKey: server.endpointKey,
+    ok: server.ok,
+    mode: getMcpServerMode(server.endpoint, mcpDisabledUrls, mcpLazyUrls),
+    error: server.error,
+    tools: server.tools.map((tool) => ({
+      id: `mcp_${server.endpointKey}__${tool.name}`,
+      name: tool.name,
+      description: tool.description
+    }))
+  })), [mcpDisabledUrls, mcpLazyUrls, mcpPreview.servers]);
+  const allMcpToolIds = useMemo(() => normalizeStringList(
+    mcpPermissionServers.flatMap((server) => server.tools.map((tool) => tool.id))
+  ), [mcpPermissionServers]);
+  const resolveMcpPermissionValues = (values: string[]) => {
+    const knownIds = new Set(allMcpToolIds);
+    const idsByRawName = new Map<string, string[]>();
+    for (const server of mcpPermissionServers) {
+      for (const tool of server.tools) {
+        idsByRawName.set(tool.name, [...(idsByRawName.get(tool.name) ?? []), tool.id]);
+      }
+    }
+    return normalizeStringList(values.flatMap((value) => {
+      if (knownIds.has(value)) {
+        return [value];
+      }
+      return idsByRawName.get(value) ?? [value];
+    }));
+  };
+  const currentMcpAllowedToolIds = resolveMcpPermissionValues(currentMcpPermission.allowedTools);
+  const currentMcpDeniedToolIds = resolveMcpPermissionValues(currentMcpPermission.deniedTools);
+  const skillPermissionOptions = useMemo(() => {
+    const seen = new Set<string>();
+    return skillOptions
+      .filter((skill) => {
+        const name = skill.name.trim();
+        if (!name || seen.has(name)) {
+          return false;
+        }
+        seen.add(name);
+        return true;
+      })
+      .sort((left, right) => left.name.localeCompare(right.name));
+  }, [skillOptions]);
+  const allSkillNames = useMemo(() => skillPermissionOptions.map((skill) => skill.name), [skillPermissionOptions]);
+
+  const setMcpPermissionValues = (userId: string, field: "allowedTools" | "deniedTools", values: string[]) => {
+    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+    const existing = mcpUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
+      userId: normalizedUserId,
+      allowedTools: [],
+      deniedTools: []
+    };
+    const next = {
+      ...existing,
+      [field]: normalizeStringList(values)
+    };
+    onMcpUserPermissionsChange(normalizeUserMcpPermissions([
+      ...mcpUserPermissions.filter((item) => item.userId !== normalizedUserId),
+      next
+    ]));
+  };
+  const setSkillPermissionValues = (userId: string, field: "allowedSkills" | "deniedSkills", values: string[]) => {
+    const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+    const existing = skillUserPermissions.find((item) => item.userId === normalizedUserId) ?? {
+      userId: normalizedUserId,
+      allowedSkills: [],
+      deniedSkills: []
+    };
+    const next = {
+      ...existing,
+      [field]: normalizeStringList(values)
+    };
+    onSkillUserPermissionsChange(normalizeUserSkillPermissions([
+      ...skillUserPermissions.filter((item) => item.userId !== normalizedUserId),
+      next
+    ]));
+  };
+  const toggleValues = (currentValues: string[], targetValues: string[], checked: boolean) => {
+    const targets = new Set(normalizeStringList(targetValues));
+    if (!targets.size) {
+      return normalizeStringList(currentValues);
+    }
+    return checked
+      ? normalizeStringList([...currentValues, ...targets])
+      : normalizeStringList(currentValues.filter((item) => !targets.has(item)));
+  };
+  const toggleAllowValues = (currentValues: string[], targetValues: string[], checked: boolean, allValues: string[]) => {
+    const baseValues = currentValues.length ? currentValues : allValues;
+    return toggleValues(baseValues, targetValues, checked);
+  };
+  const allTargetsSelected = (selectedValues: string[], targetValues: string[], defaultAll = false) => {
+    const targets = normalizeStringList(targetValues);
+    if (!targets.length) {
+      return false;
+    }
+    if (defaultAll && !selectedValues.length) {
+      return true;
+    }
+    const selected = new Set(selectedValues);
+    return targets.every((item) => selected.has(item));
+  };
+  const countSelectedTargets = (selectedValues: string[], targetValues: string[], defaultAll = false) => {
+    const targets = normalizeStringList(targetValues);
+    if (defaultAll && !selectedValues.length) {
+      return targets.length;
+    }
+    const selected = new Set(selectedValues);
+    return targets.filter((item) => selected.has(item)).length;
   };
 
   const setServerMode = (endpoint: string, mode: McpExposureMode) => {
@@ -4990,50 +5095,254 @@ function SettingsWorkspace(props: {
         <div className="section-head">
           <div>
             <h3>用户权限</h3>
-            <span>按默认用户 ID 限制可见/可调用的 MCP 工具与可加载的 skills；allowlist 为空表示默认允许全部，denylist 优先。</span>
+            <span>按默认用户 ID 勾选可见/可调用的 MCP 与可加载的 Skills；可用项为空表示默认允许全部，禁用项优先生效。</span>
           </div>
         </div>
-        <div className="form-grid">
-          <label className="field">
-            <span>当前用户可用 MCP 工具 allowlist</span>
-            <textarea
-              className="prompt-textarea"
-              onChange={(event) => updateMcpPermission(currentPermissionUserId, "allowedTools", event.target.value)}
-              placeholder={"每行或逗号一个工具名；支持 MCP 原始名或 mcp_<endpoint>__<tool> 完整名。留空表示允许全部。"}
-              value={permissionListToText(currentMcpPermission.allowedTools)}
-            />
-            <small>当前配置用户：{currentPermissionUserId}。保存后聊天和 MCP 预览都会只展示允许的工具。</small>
-          </label>
-          <label className="field">
-            <span>当前用户禁用 MCP 工具 denylist</span>
-            <textarea
-              className="prompt-textarea"
-              onChange={(event) => updateMcpPermission(currentPermissionUserId, "deniedTools", event.target.value)}
-              placeholder="每行或逗号一个工具名；denylist 优先于 allowlist。"
-              value={permissionListToText(currentMcpPermission.deniedTools)}
-            />
-            <small>适合临时屏蔽高风险工具；对直接工具调用也会生效。</small>
-          </label>
-          <label className="field">
-            <span>当前用户可加载 Skills allowlist</span>
-            <textarea
-              className="prompt-textarea"
-              onChange={(event) => updateSkillPermission(currentPermissionUserId, "allowedSkills", event.target.value)}
-              placeholder="每行或逗号一个 skill 名；留空表示允许全部。"
-              value={permissionListToText(currentSkillPermission.allowedSkills)}
-            />
-            <small>会影响系统提示词里的 skill 清单、Skills 管理页 effective 列表，以及 load_skill 工具。</small>
-          </label>
-          <label className="field">
-            <span>当前用户禁用 Skills denylist</span>
-            <textarea
-              className="prompt-textarea"
-              onChange={(event) => updateSkillPermission(currentPermissionUserId, "deniedSkills", event.target.value)}
-              placeholder="每行或逗号一个 skill 名；denylist 优先于 allowlist。"
-              value={permissionListToText(currentSkillPermission.deniedSkills)}
-            />
-            <small>用于隐藏并阻止加载指定 skill。</small>
-          </label>
+        <div className="permission-panel">
+          <div className="permission-panel-head">
+            <div>
+              <strong>当前配置用户：{currentPermissionUserId}</strong>
+              <p>先勾选一个 MCP 连接可一键选择该连接下全部工具，也可以展开后单独勾选某些工具。</p>
+            </div>
+            <div className="button-row">
+              <button
+                className="button ghost"
+                onClick={() => setMcpPermissionValues(currentPermissionUserId, "allowedTools", [])}
+                type="button"
+              >
+                MCP 默认全允许
+              </button>
+              <button
+                className="button ghost"
+                onClick={() => setSkillPermissionValues(currentPermissionUserId, "allowedSkills", [])}
+                type="button"
+              >
+                Skill 默认全允许
+              </button>
+            </div>
+          </div>
+
+          <div className="permission-grid">
+            <section className="permission-selector">
+              <div className="permission-selector-head">
+                <div>
+                  <h4>用户可用 MCP</h4>
+                  <p>{currentMcpAllowedToolIds.length ? `已明确允许 ${countSelectedTargets(currentMcpAllowedToolIds, allMcpToolIds)} / ${allMcpToolIds.length} 个工具` : `默认允许全部 ${allMcpToolIds.length} 个工具`}</p>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="button ghost"
+                    disabled={!allMcpToolIds.length}
+                    onClick={() => setMcpPermissionValues(currentPermissionUserId, "allowedTools", allMcpToolIds)}
+                    type="button"
+                  >
+                    全选 MCP
+                  </button>
+                  <button
+                    className="button ghost"
+                    disabled={!allMcpToolIds.length}
+                    onClick={() => setMcpPermissionValues(currentPermissionUserId, "allowedTools", [EMPTY_PERMISSION_ALLOWLIST])}
+                    type="button"
+                  >
+                    清空可用
+                  </button>
+                </div>
+              </div>
+              {!mcpPermissionServers.length ? <div className="empty-block compact">先配置并测试 MCP 后，这里会显示可勾选的连接与工具。</div> : null}
+              {mcpPermissionServers.map((server) => {
+                const serverToolIds = server.tools.map((tool) => tool.id);
+                const serverChecked = allTargetsSelected(currentMcpAllowedToolIds, serverToolIds, true);
+                return (
+                  <details className="permission-server" key={`mcp-allow-${server.endpoint}`} open>
+                    <summary>
+                      <label className="permission-check" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          checked={serverChecked}
+                          disabled={!serverToolIds.length}
+                          onChange={(event) => setMcpPermissionValues(
+                            currentPermissionUserId,
+                            "allowedTools",
+                            toggleAllowValues(currentMcpAllowedToolIds, serverToolIds, event.target.checked, allMcpToolIds)
+                          )}
+                          type="checkbox"
+                        />
+                        <span>{server.endpoint}</span>
+                      </label>
+                      <small>{countSelectedTargets(currentMcpAllowedToolIds, serverToolIds, true)} / {serverToolIds.length} 可用 · {server.mode === "disabled" ? "MCP 已禁用" : server.ok ? "连接正常" : "连接失败"}</small>
+                    </summary>
+                    {server.error ? <div className="empty-block compact">{server.error}</div> : null}
+                    <div className="permission-option-list">
+                      {server.tools.map((tool) => (
+                        <label className="permission-option" key={`allow-${tool.id}`}>
+                          <input
+                            checked={allTargetsSelected(currentMcpAllowedToolIds, [tool.id], true)}
+                            onChange={(event) => setMcpPermissionValues(
+                              currentPermissionUserId,
+                              "allowedTools",
+                              toggleAllowValues(currentMcpAllowedToolIds, [tool.id], event.target.checked, allMcpToolIds)
+                            )}
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong>{tool.name}</strong>
+                            <small>{tool.description || tool.id}</small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </section>
+
+            <section className="permission-selector">
+              <div className="permission-selector-head">
+                <div>
+                  <h4>用户禁用 MCP</h4>
+                  <p>已禁用 {countSelectedTargets(currentMcpDeniedToolIds, allMcpToolIds)} / {allMcpToolIds.length} 个工具</p>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="button ghost"
+                    disabled={!currentMcpDeniedToolIds.length}
+                    onClick={() => setMcpPermissionValues(currentPermissionUserId, "deniedTools", [])}
+                    type="button"
+                  >
+                    清空禁用
+                  </button>
+                </div>
+              </div>
+              {!mcpPermissionServers.length ? <div className="empty-block compact">先配置并测试 MCP 后，这里会显示可勾选的连接与工具。</div> : null}
+              {mcpPermissionServers.map((server) => {
+                const serverToolIds = server.tools.map((tool) => tool.id);
+                return (
+                  <details className="permission-server" key={`mcp-deny-${server.endpoint}`}>
+                    <summary>
+                      <label className="permission-check" onClick={(event) => event.stopPropagation()}>
+                        <input
+                          checked={allTargetsSelected(currentMcpDeniedToolIds, serverToolIds)}
+                          disabled={!serverToolIds.length}
+                          onChange={(event) => setMcpPermissionValues(
+                            currentPermissionUserId,
+                            "deniedTools",
+                            toggleValues(currentMcpDeniedToolIds, serverToolIds, event.target.checked)
+                          )}
+                          type="checkbox"
+                        />
+                        <span>{server.endpoint}</span>
+                      </label>
+                      <small>{countSelectedTargets(currentMcpDeniedToolIds, serverToolIds)} / {serverToolIds.length} 禁用 · denylist 优先</small>
+                    </summary>
+                    <div className="permission-option-list">
+                      {server.tools.map((tool) => (
+                        <label className="permission-option" key={`deny-${tool.id}`}>
+                          <input
+                            checked={allTargetsSelected(currentMcpDeniedToolIds, [tool.id])}
+                            onChange={(event) => setMcpPermissionValues(
+                              currentPermissionUserId,
+                              "deniedTools",
+                              toggleValues(currentMcpDeniedToolIds, [tool.id], event.target.checked)
+                            )}
+                            type="checkbox"
+                          />
+                          <span>
+                            <strong>{tool.name}</strong>
+                            <small>{tool.description || tool.id}</small>
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </details>
+                );
+              })}
+            </section>
+
+            <section className="permission-selector">
+              <div className="permission-selector-head">
+                <div>
+                  <h4>用户可用 Skills</h4>
+                  <p>{currentSkillPermission.allowedSkills.length ? `已明确允许 ${countSelectedTargets(currentSkillPermission.allowedSkills, allSkillNames)} / ${allSkillNames.length} 个 Skill` : `默认允许全部 ${allSkillNames.length} 个 Skill`}</p>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="button ghost"
+                    disabled={!allSkillNames.length}
+                    onClick={() => setSkillPermissionValues(currentPermissionUserId, "allowedSkills", allSkillNames)}
+                    type="button"
+                  >
+                    全选 Skill
+                  </button>
+                  <button
+                    className="button ghost"
+                    disabled={!allSkillNames.length}
+                    onClick={() => setSkillPermissionValues(currentPermissionUserId, "allowedSkills", [EMPTY_PERMISSION_ALLOWLIST])}
+                    type="button"
+                  >
+                    清空可用
+                  </button>
+                </div>
+              </div>
+              {!skillPermissionOptions.length ? <div className="empty-block compact">当前没有可展示的 Skill；可先到 Skills 管理页新增或刷新。</div> : null}
+              <div className="permission-option-list">
+                {skillPermissionOptions.map((skill) => (
+                  <label className="permission-option" key={`skill-allow-${skill.name}`}>
+                    <input
+                      checked={allTargetsSelected(currentSkillPermission.allowedSkills, [skill.name], true)}
+                      onChange={(event) => setSkillPermissionValues(
+                        currentPermissionUserId,
+                        "allowedSkills",
+                        toggleAllowValues(currentSkillPermission.allowedSkills, [skill.name], event.target.checked, allSkillNames)
+                      )}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{skill.name}</strong>
+                      <small>{skill.description || skill.scope || "无描述"}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </section>
+
+            <section className="permission-selector">
+              <div className="permission-selector-head">
+                <div>
+                  <h4>用户禁用 Skills</h4>
+                  <p>已禁用 {countSelectedTargets(currentSkillPermission.deniedSkills, allSkillNames)} / {allSkillNames.length} 个 Skill</p>
+                </div>
+                <div className="button-row">
+                  <button
+                    className="button ghost"
+                    disabled={!currentSkillPermission.deniedSkills.length}
+                    onClick={() => setSkillPermissionValues(currentPermissionUserId, "deniedSkills", [])}
+                    type="button"
+                  >
+                    清空禁用
+                  </button>
+                </div>
+              </div>
+              {!skillPermissionOptions.length ? <div className="empty-block compact">当前没有可展示的 Skill；可先到 Skills 管理页新增或刷新。</div> : null}
+              <div className="permission-option-list">
+                {skillPermissionOptions.map((skill) => (
+                  <label className="permission-option" key={`skill-deny-${skill.name}`}>
+                    <input
+                      checked={allTargetsSelected(currentSkillPermission.deniedSkills, [skill.name])}
+                      onChange={(event) => setSkillPermissionValues(
+                        currentPermissionUserId,
+                        "deniedSkills",
+                        toggleValues(currentSkillPermission.deniedSkills, [skill.name], event.target.checked)
+                      )}
+                      type="checkbox"
+                    />
+                    <span>
+                      <strong>{skill.name}</strong>
+                      <small>{skill.description || skill.scope || "无描述"}</small>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </section>
+          </div>
         </div>
 
         <label className="field">
@@ -5468,6 +5777,22 @@ async function fetchAgentPromptSettings(apiBase: string) {
     throw new Error(await readErrorResponse(response));
   }
   return await response.json() as Record<string, unknown>;
+}
+
+async function fetchSkillOptions(apiBase: string, userId: string) {
+  const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
+  const params = new URLSearchParams();
+  params.set("scope", "effective");
+  const trimmedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
+  if (trimmedUserId) {
+    params.set("user_id", trimmedUserId);
+  }
+  const response = await fetch(`${target}/agent/skills?${params.toString()}`);
+  if (!response.ok) {
+    throw new Error(await readErrorResponse(response));
+  }
+  const data = await response.json() as { skills?: SkillItem[] };
+  return Array.isArray(data.skills) ? data.skills : [];
 }
 
 async function fetchMcpPreview(

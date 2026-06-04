@@ -2289,3 +2289,156 @@ button {
     grid-template-columns: 1fr;
   }
 }
+
+.permission-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin: 12px 0 20px;
+}
+
+.permission-panel-head,
+.permission-selector-head {
+    align-items: flex-start;
+    display: flex;
+    gap: 12px;
+    justify-content: space-between;
+    flex-wrap: wrap;
+}
+
+.permission-panel-head strong,
+.permission-selector-head h4 {
+    color: var(--text);
+    display: block;
+    font-size: 14px;
+    margin: 0 0 4px;
+}
+
+.permission-panel-head p,
+.permission-selector-head p {
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+    margin: 0;
+}
+
+.permission-grid {
+    display: grid;
+    gap: 14px;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.permission-selector {
+    background: rgba(24, 32, 27, 0.035);
+    border: 1px solid rgba(24, 32, 27, 0.07);
+    border-radius: 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    min-width: 0;
+    padding: 14px;
+}
+
+.permission-server {
+    background: rgba(255, 255, 255, 0.56);
+    border: 1px solid rgba(24, 32, 27, 0.06);
+    border-radius: 14px;
+    overflow: hidden;
+}
+
+.permission-server summary {
+    align-items: flex-start;
+    cursor: pointer;
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    list-style: none;
+    padding: 12px;
+}
+
+.permission-server summary::-webkit-details-marker {
+    display: none;
+}
+
+.permission-server summary > small {
+    color: var(--muted);
+    flex: 0 0 auto;
+    font-size: 12px;
+    line-height: 1.45;
+    text-align: right;
+}
+
+.permission-check,
+.permission-option {
+    align-items: flex-start;
+    cursor: pointer;
+    display: flex;
+    gap: 10px;
+    min-width: 0;
+}
+
+.permission-check {
+    flex: 1 1 auto;
+}
+
+.permission-check input,
+.permission-option input {
+    flex: 0 0 auto;
+    height: 18px;
+    margin-top: 1px;
+    width: 18px;
+}
+
+.permission-check span,
+.permission-option span {
+    min-width: 0;
+}
+
+.permission-check span {
+    font-size: 13px;
+    font-weight: 700;
+    line-height: 1.45;
+    word-break: break-all;
+}
+
+.permission-option-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: 340px;
+    overflow: auto;
+    padding: 0 12px 12px;
+}
+
+.permission-selector > .permission-option-list {
+    padding: 0;
+}
+
+.permission-option {
+    background: rgba(255, 255, 255, 0.66);
+    border: 1px solid rgba(24, 32, 27, 0.055);
+    border-radius: 12px;
+    padding: 10px;
+}
+
+.permission-option strong {
+    display: block;
+    font-size: 13px;
+    line-height: 1.35;
+    word-break: break-all;
+}
+
+.permission-option small {
+    color: var(--muted);
+    display: block;
+    font-size: 12px;
+    line-height: 1.45;
+    margin-top: 2px;
+    word-break: break-word;
+}
+
+@media (max-width: 1100px) {
+    .permission-grid {
+        grid-template-columns: 1fr;
+    }
+}
