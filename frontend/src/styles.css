@@ -1360,7 +1360,7 @@ button {
 }
 
 .settings-grid {
-    grid-template-columns: 1.3fr 1fr;
+    grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
 }
 
 .harness-grid {
@@ -1371,6 +1371,7 @@ button {
     display: flex;
     flex-direction: column;
     gap: 18px;
+    min-width: 0;
 }
 
 .form-grid {
@@ -1718,6 +1719,8 @@ button {
     display: flex;
     flex-direction: column;
     gap: 14px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-preview-card {
@@ -1728,6 +1731,8 @@ button {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-preview-head {
@@ -1736,6 +1741,12 @@ button {
     gap: 12px;
     align-items: flex-start;
     flex-wrap: wrap;
+    min-width: 0;
+}
+
+.mcp-preview-head > div:first-child {
+    flex: 1 1 240px;
+    min-width: 0;
 }
 
 .mcp-toolbar {
@@ -1763,12 +1774,15 @@ button {
     flex-wrap: wrap;
     justify-content: flex-end;
     align-items: center;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-mode-switch {
     display: flex;
     gap: 6px;
     flex-wrap: wrap;
+    min-width: 0;
 }
 
 .mcp-preview-head h4 {
@@ -1787,6 +1801,8 @@ button {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-tool-item {
@@ -1797,6 +1813,8 @@ button {
     border-radius: 14px;
     background: rgba(255, 255, 255, 0.6);
     border: 1px solid rgba(24, 32, 27, 0.06);
+    min-width: 0;
+    max-width: 100%;
 }
 
 .mcp-tool-item.compact {
