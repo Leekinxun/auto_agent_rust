@@ -100,6 +100,7 @@ impl ChatOrchestrator {
 
     pub async fn run(&self, request: ChatRequest, mode: ChatMode) -> Result<ChatResult> {
         let mut skill_usages = Vec::new();
+        log_agent_input(&mode, "sync", &request);
         let prepared = self.prepare_request(request, &mode)?;
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
@@ -121,8 +122,22 @@ impl ChatOrchestrator {
         let run_result: Result<()> = async {
             for _ in 0..max_iterations {
                 iterations += 1;
+                log_agent_iteration_start(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "sync",
+                    iterations,
+                    messages.len(),
+                );
                 microcompact(&mut messages);
                 if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
+                    tracing::info!(
+                        mode = mode.as_str(),
+                        run_kind = "sync",
+                        iteration = iterations,
+                        "agent context auto-compaction triggered"
+                    );
                     messages = auto_compact(
                         &self.repo_root,
                         &self.config,
@@ -144,15 +159,21 @@ impl ChatOrchestrator {
                         &mcp_tool_selection,
                     )
                     .await;
-                let response = self
-                    .llm_client
-                    .chat(&self.build_llm_request_options(
-                        messages.clone(),
-                        Some(tools),
-                        false,
-                        &prepared.llm_overrides,
-                    )?)
-                    .await?;
+                let request_body = self.build_llm_request_options(
+                    messages.clone(),
+                    Some(tools),
+                    false,
+                    &prepared.llm_overrides,
+                )?;
+                log_llm_request(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "sync",
+                    iterations,
+                    &request_body,
+                );
+                let response = self.llm_client.chat(&request_body).await?;
                 let Some(choice) = response.choices.into_iter().next() else {
                     finish_reason = "empty".to_string();
                     break;
@@ -161,6 +182,16 @@ impl ChatOrchestrator {
                 let assistant = choice.message;
                 let tool_calls = assistant.tool_calls.clone();
                 let assistant_content = assistant.content.clone().unwrap_or_default();
+                log_llm_response(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "sync",
+                    iterations,
+                    &finish_reason,
+                    &assistant_content,
+                    &tool_calls,
+                );
                 messages.push(assistant.into_chat_message());
                 if tool_calls.is_empty() {
                     append_reply_segment(&mut reply, &assistant_content);
@@ -181,6 +212,15 @@ impl ChatOrchestrator {
                 let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
+                    log_tool_call(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "sync",
+                        iterations,
+                        index + 1,
+                        tool_call,
+                    );
                     let result = self
                         .dispatch_public_tool(
                             tool_call,
@@ -196,12 +236,32 @@ impl ChatOrchestrator {
                             None,
                         )
                         .await;
+                    log_tool_result(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "sync",
+                        iterations,
+                        index + 1,
+                        &tool_call.function.name,
+                        &result,
+                    );
                     if tool_call.function.name == "compress" {
                         compress_requested = true;
                     }
                     let context_result = self
                         .prepare_tool_result_for_context(tool_call, result)
                         .await;
+                    log_tool_context_result(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "sync",
+                        iterations,
+                        index + 1,
+                        &tool_call.function.name,
+                        &context_result,
+                    );
                     messages.push(ChatMessage::tool(
                         tool_call.id.clone(),
                         context_result.model_content,
@@ -348,6 +408,7 @@ impl ChatOrchestrator {
         sender: mpsc::Sender<ChatEvent>,
     ) -> Result<()> {
         let mut skill_usages = Vec::new();
+        log_agent_input(&mode, "stream", &request);
         let prepared = self.prepare_request(request, &mode)?;
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
@@ -369,12 +430,26 @@ impl ChatOrchestrator {
         let stream_result: Result<()> = async {
             for _ in 0..max_iterations {
                 iterations += 1;
+                log_agent_iteration_start(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "stream",
+                    iterations,
+                    messages.len(),
+                );
                 if sender.is_closed() {
                     tracing::info!("stream receiver closed before next iteration");
                     return Ok(());
                 }
                 microcompact(&mut messages);
                 if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
+                    tracing::info!(
+                        mode = mode.as_str(),
+                        run_kind = "stream",
+                        iteration = iterations,
+                        "agent context auto-compaction triggered"
+                    );
                     messages = auto_compact(
                         &self.repo_root,
                         &self.config,
@@ -402,6 +477,14 @@ impl ChatOrchestrator {
                     true,
                     &prepared.llm_overrides,
                 )?;
+                log_llm_request(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "stream",
+                    iterations,
+                    &request_body,
+                );
                 let mut stream = self.llm_client.stream_chat(&request_body).await?;
                 let mut buffer = String::new();
                 let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
@@ -464,6 +547,16 @@ impl ChatOrchestrator {
                     .filter(|item| !item.name.is_empty())
                     .map(ToolCallAccumulator::into_tool_call)
                     .collect::<Vec<_>>();
+                log_llm_response(
+                    &mode,
+                    prepared.session.as_deref(),
+                    prepared.user_id.as_deref(),
+                    "stream",
+                    iterations,
+                    &finish_reason,
+                    &round_text,
+                    &tool_calls,
+                );
 
                 messages.push(ChatMessage::assistant(
                     if round_text.is_empty() {
@@ -580,6 +673,15 @@ impl ChatOrchestrator {
                 let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
+                    log_tool_call(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "stream",
+                        iterations,
+                        index + 1,
+                        tool_call,
+                    );
                     if !try_send_stream_event(
                         &sender,
                         ChatEvent::ToolUse {
@@ -606,6 +708,16 @@ impl ChatOrchestrator {
                             Some(&sender),
                         )
                         .await;
+                    log_tool_result(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "stream",
+                        iterations,
+                        index + 1,
+                        &tool_call.function.name,
+                        &result,
+                    );
                     if tool_call.function.name == "compress" {
                         compress_requested = true;
                     }
@@ -624,6 +736,16 @@ impl ChatOrchestrator {
                     let context_result = self
                         .prepare_tool_result_for_context(tool_call, result)
                         .await;
+                    log_tool_context_result(
+                        &mode,
+                        prepared.session.as_deref(),
+                        prepared.user_id.as_deref(),
+                        "stream",
+                        iterations,
+                        index + 1,
+                        &tool_call.function.name,
+                        &context_result,
+                    );
                     messages.push(ChatMessage::tool(
                         tool_call.id.clone(),
                         context_result.model_content,
@@ -2280,6 +2402,176 @@ fn build_empty_stream_reply_error(finish_reason: &str, max_iterations: usize) ->
     )
 }
 
+fn log_agent_input(mode: &ChatMode, run_kind: &str, request: &ChatRequest) {
+    let request_json = serde_json::to_string_pretty(request)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = request.session_id.as_deref().unwrap_or("-"),
+        user_id = request.user_id.as_deref().unwrap_or("-"),
+        history_items = request.history.len(),
+        uploaded_files = request.files.len(),
+        "agent input follows\n{}",
+        request_json
+    );
+}
+
+fn log_agent_iteration_start(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    messages_before_iteration: usize,
+) {
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        messages_before_iteration,
+        "agent iteration started"
+    );
+}
+
+fn log_llm_request(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    request: &ChatCompletionRequest,
+) {
+    let request_json = serde_json::to_string_pretty(request)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        model = request.model,
+        stream = request.stream,
+        message_count = request.messages.len(),
+        tool_count = request.tools.as_ref().map(Vec::len).unwrap_or(0),
+        "llm request follows\n{}",
+        request_json
+    );
+}
+
+fn log_llm_response(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    finish_reason: &str,
+    assistant_content: &str,
+    tool_calls: &[ToolCall],
+) {
+    let response_json = serde_json::to_string_pretty(&json!({
+        "finish_reason": finish_reason,
+        "message": {
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": tool_calls,
+        }
+    }))
+    .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        finish_reason,
+        assistant_content_chars = assistant_content.chars().count(),
+        tool_call_count = tool_calls.len(),
+        "llm response follows\n{}",
+        response_json
+    );
+}
+
+fn log_tool_call(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    tool_index: usize,
+    tool_call: &ToolCall,
+) {
+    let tool_call_json = serde_json::to_string_pretty(tool_call)
+        .unwrap_or_else(|error| format!("{{\"serialization_error\":\"{error}\"}}"));
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        tool_index,
+        tool = tool_call.function.name,
+        arguments_chars = tool_call.function.arguments.chars().count(),
+        "agent tool call follows\n{}",
+        tool_call_json
+    );
+}
+
+fn log_tool_result(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    tool_index: usize,
+    tool_name: &str,
+    result: &str,
+) {
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        tool_index,
+        tool = tool_name,
+        result_chars = result.chars().count(),
+        "agent tool result follows\n{}",
+        result
+    );
+}
+
+fn log_tool_context_result(
+    mode: &ChatMode,
+    session: Option<&SessionContext>,
+    user_id: Option<&str>,
+    run_kind: &str,
+    iteration: usize,
+    tool_index: usize,
+    tool_name: &str,
+    context_result: &crate::domain::chat::tool_context::ToolContextResult,
+) {
+    tracing::info!(
+        mode = mode.as_str(),
+        run_kind,
+        session_id = session_id_or_dash(session),
+        user_id = user_id.unwrap_or("-"),
+        iteration,
+        tool_index,
+        tool = tool_name,
+        model_content_chars = context_result.model_content.chars().count(),
+        persisted_path = context_result
+            .persisted_path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "-".to_string()),
+        "agent tool context result follows\n{}",
+        context_result.model_content
+    );
+}
+
 fn log_final_reply(
     mode: &ChatMode,
     session: Option<&SessionContext>,
@@ -2287,13 +2579,8 @@ fn log_final_reply(
     finish_reason: &str,
     assistant_reply: &str,
 ) {
-    let mode = match mode {
-        ChatMode::Stateless => "stateless",
-        ChatMode::Memory => "memory",
-    };
-    let session_id = session
-        .map(|session| session.session_id.as_str())
-        .unwrap_or("-");
+    let mode = mode.as_str();
+    let session_id = session_id_or_dash(session);
     let user_id = user_id.unwrap_or("-");
     let reply_chars = assistant_reply.chars().count();
 
@@ -2318,6 +2605,12 @@ fn log_final_reply(
         "llm final reply follows\n{}",
         assistant_reply
     );
+}
+
+fn session_id_or_dash(session: Option<&SessionContext>) -> &str {
+    session
+        .map(|session| session.session_id.as_str())
+        .unwrap_or("-")
 }
 
 fn should_use_mcp_file_reader(arguments: &serde_json::Value) -> bool {
@@ -2427,11 +2720,17 @@ fn extract_output_files(repo_root: &Path, reply: &str) -> Vec<OutputFile> {
 mod tests {
     use super::{
         ChatMode, append_system_instruction, build_subagent_initial_messages, extract_output_files,
-        log_final_reply, resolve_max_iterations, static_public_tool_schemas,
+        log_agent_input, log_final_reply, log_llm_request, log_llm_response, log_tool_call,
+        log_tool_context_result, log_tool_result, resolve_max_iterations,
+        static_public_tool_schemas,
     };
     use crate::config::model::AppConfig;
-    use crate::domain::chat::models::LlmOverrides;
+    use crate::domain::chat::models::{
+        AgentPromptOverrides, ChatRequest, HitlOverrides, LlmOverrides, McpOverrides,
+        SkillPermissions,
+    };
     use crate::domain::chat::orchestrator::ChatOrchestrator;
+    use crate::domain::chat::tool_context::ToolContextResult;
     use crate::domain::events::service::EventService;
     use crate::domain::harness::HarnessAssets;
     use crate::domain::memory::service::UserMemoryService;
@@ -2442,7 +2741,7 @@ mod tests {
     use crate::infra::fs::skill_store::FileSkillStore;
     use crate::infra::fs::user_memory_store::FileMemoryStore;
     use crate::infra::llm::client::LlmClient;
-    use crate::infra::llm::types::{ChatMessage, FunctionCall, ToolCall};
+    use crate::infra::llm::types::{ChatCompletionRequest, ChatMessage, FunctionCall, ToolCall};
     use crate::infra::mcp::client::McpClient;
     use std::collections::HashSet;
     use std::fs;
@@ -2529,6 +2828,132 @@ mod tests {
         assert!(output.contains("user-123"));
         assert!(output.contains("finish_reason"));
         assert!(output.contains("stop"));
+    }
+
+    #[test]
+    fn logs_agent_input_and_intermediate_steps() {
+        let writer = SharedWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(writer.clone())
+            .without_time()
+            .with_ansi(false)
+            .finish();
+
+        let tool_call = ToolCall {
+            id: "call-1".to_string(),
+            kind: "function".to_string(),
+            function: FunctionCall {
+                name: "read_file".to_string(),
+                arguments: r#"{"path":"README.md"}"#.to_string(),
+            },
+        };
+        let request = ChatRequest {
+            message: "请读取 README".to_string(),
+            history: vec![super::HistoryEntry {
+                role: "user".to_string(),
+                content: "之前的问题".to_string(),
+            }],
+            system: Some("system prompt".to_string()),
+            system_override: None,
+            system_append: Some("append prompt".to_string()),
+            session_id: Some("session-1".to_string()),
+            user_id: Some("user-1".to_string()),
+            files: Vec::new(),
+            llm_overrides: LlmOverrides {
+                model_id: Some("test-model".to_string()),
+                temperature: Some(0.1),
+                max_tokens: Some(128),
+                max_iterations: Some(3),
+                top_p: Some(0.9),
+            },
+            prompt_overrides: AgentPromptOverrides::default(),
+            mcp_overrides: McpOverrides::default(),
+            skill_permissions: SkillPermissions::default(),
+            hitl_overrides: HitlOverrides::default(),
+        };
+        let llm_request = ChatCompletionRequest {
+            model: "test-model".to_string(),
+            messages: vec![
+                ChatMessage::system("system prompt"),
+                ChatMessage::user("hello"),
+            ],
+            tools: Some(vec![serde_json::json!({
+                "type": "function",
+                "function": { "name": "read_file" }
+            })]),
+            stream: false,
+            temperature: Some(0.1),
+            max_tokens: Some(128),
+            top_p: Some(0.9),
+        };
+        let context_result = ToolContextResult {
+            model_content: "tool output for model".to_string(),
+            persisted_path: None,
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            log_agent_input(&ChatMode::Stateless, "sync", &request);
+            log_llm_request(
+                &ChatMode::Stateless,
+                None,
+                Some("user-1"),
+                "sync",
+                1,
+                &llm_request,
+            );
+            log_llm_response(
+                &ChatMode::Stateless,
+                None,
+                Some("user-1"),
+                "sync",
+                1,
+                "tool_calls",
+                "",
+                std::slice::from_ref(&tool_call),
+            );
+            log_tool_call(
+                &ChatMode::Stateless,
+                None,
+                Some("user-1"),
+                "sync",
+                1,
+                1,
+                &tool_call,
+            );
+            log_tool_result(
+                &ChatMode::Stateless,
+                None,
+                Some("user-1"),
+                "sync",
+                1,
+                1,
+                "read_file",
+                "README content",
+            );
+            log_tool_context_result(
+                &ChatMode::Stateless,
+                None,
+                Some("user-1"),
+                "sync",
+                1,
+                1,
+                "read_file",
+                &context_result,
+            );
+        });
+
+        let output = writer.contents();
+        assert!(output.contains("agent input follows"));
+        assert!(output.contains("请读取 README"));
+        assert!(output.contains("llm request follows"));
+        assert!(output.contains("system prompt"));
+        assert!(output.contains("llm response follows"));
+        assert!(output.contains("agent tool call follows"));
+        assert!(output.contains("README.md"));
+        assert!(output.contains("agent tool result follows"));
+        assert!(output.contains("README content"));
+        assert!(output.contains("agent tool context result follows"));
+        assert!(output.contains("tool output for model"));
     }
 
     #[test]

@@ -38,7 +38,7 @@ pub struct UploadedFile {
     pub content_type: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LlmOverrides {
     pub model_id: Option<String>,
     pub temperature: Option<f32>,
@@ -63,7 +63,7 @@ pub enum McpExposureMode {
     Disabled,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct McpOverrides {
     pub config_path: Option<String>,
     pub base_urls: Vec<String>,
@@ -100,7 +100,7 @@ impl McpOverrides {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct HitlOverrides {
     pub enabled: bool,
     pub default_action: HitlDefaultAction,
@@ -119,6 +119,7 @@ impl Default for HitlOverrides {
     }
 }
 
+#[derive(Serialize)]
 pub struct ChatRequest {
     pub message: String,
     pub history: Vec<HistoryEntry>,
@@ -171,7 +172,7 @@ pub struct McpToolPreviewDto {
     pub description: String,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct SkillPermissions {
     pub allowed_skills: Vec<String>,
     pub denied_skills: Vec<String>,
