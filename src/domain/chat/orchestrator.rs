@@ -486,7 +486,7 @@ impl ChatOrchestrator {
                     &request_body,
                 );
                 let mut stream = self.llm_client.stream_chat(&request_body).await?;
-                let mut buffer = String::new();
+                let mut buffer = Vec::new();
                 let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
                 let mut round_text = String::new();
                 let mut finish_reason = "stop".to_string();
@@ -503,43 +503,35 @@ impl ChatOrchestrator {
                         break;
                     };
                     let bytes = chunk.context("failed to read llm stream chunk")?;
-                    buffer.push_str(
-                        std::str::from_utf8(&bytes).context("llm stream returned invalid utf-8")?,
-                    );
+                    buffer.extend_from_slice(&bytes);
 
-                    while let Some(index) = buffer.find("\n\n") {
-                        let frame = buffer[..index].to_string();
-                        buffer = buffer[index + 2..].to_string();
-                        for payload in parse_sse_frame(&frame)? {
-                            if payload == "[DONE]" {
-                                continue;
-                            }
-                            let chunk: StreamChunk = serde_json::from_str(&payload)
-                                .context("invalid llm stream json")?;
-                            for choice in chunk.choices {
-                                if let Some(content) = choice.delta.content {
-                                    if !content.is_empty() {
-                                        round_text.push_str(&content);
-                                        full_reply.push_str(&content);
-                                        if !try_send_stream_event(&sender, ChatEvent::Text(content))
-                                            .await
-                                        {
-                                            return Ok(());
-                                        }
-                                    }
-                                }
-                                for delta in choice.delta.tool_calls {
-                                    while tool_accumulators.len() <= delta.index {
-                                        tool_accumulators.push(ToolCallAccumulator::default());
-                                    }
-                                    tool_accumulators[delta.index].apply_delta(delta);
-                                }
-                                if let Some(reason) = choice.finish_reason {
-                                    finish_reason = reason;
-                                }
-                            }
-                        }
+                    while let Some(frame) = next_sse_frame(&mut buffer)? {
+                        process_llm_sse_frame(
+                            &frame,
+                            &mut tool_accumulators,
+                            &mut round_text,
+                            &mut full_reply,
+                            &mut finish_reason,
+                            &sender,
+                        )
+                        .await?;
                     }
+                }
+
+                if !buffer.is_empty() {
+                    let frame = std::str::from_utf8(&buffer)
+                        .context("llm stream returned invalid utf-8 in trailing frame")?
+                        .to_string();
+                    buffer.clear();
+                    process_llm_sse_frame(
+                        &frame,
+                        &mut tool_accumulators,
+                        &mut round_text,
+                        &mut full_reply,
+                        &mut finish_reason,
+                        &sender,
+                    )
+                    .await?;
                 }
 
                 let tool_calls = tool_accumulators
@@ -2006,6 +1998,68 @@ Skills available (call load_skill to use):
     }
 }
 
+async fn process_llm_sse_frame(
+    frame: &str,
+    tool_accumulators: &mut Vec<ToolCallAccumulator>,
+    round_text: &mut String,
+    full_reply: &mut String,
+    finish_reason: &mut String,
+    sender: &mpsc::Sender<ChatEvent>,
+) -> Result<()> {
+    for payload in parse_sse_frame(frame)? {
+        if payload == "[DONE]" {
+            continue;
+        }
+        let chunk: StreamChunk =
+            serde_json::from_str(&payload).context("invalid llm stream json")?;
+        for choice in chunk.choices {
+            if let Some(content) = choice.delta.content {
+                if !content.is_empty() {
+                    round_text.push_str(&content);
+                    full_reply.push_str(&content);
+                    if !try_send_stream_event(sender, ChatEvent::Text(content)).await {
+                        return Ok(());
+                    }
+                }
+            }
+            for delta in choice.delta.tool_calls {
+                while tool_accumulators.len() <= delta.index {
+                    tool_accumulators.push(ToolCallAccumulator::default());
+                }
+                tool_accumulators[delta.index].apply_delta(delta);
+            }
+            if let Some(reason) = choice.finish_reason {
+                *finish_reason = reason;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn next_sse_frame(buffer: &mut Vec<u8>) -> Result<Option<String>> {
+    let Some((delimiter_start, delimiter_len)) = find_sse_frame_delimiter(buffer) else {
+        return Ok(None);
+    };
+
+    let frame_bytes = buffer[..delimiter_start].to_vec();
+    buffer.drain(..delimiter_start + delimiter_len);
+    let frame = String::from_utf8(frame_bytes).context("llm stream returned invalid utf-8")?;
+    Ok(Some(frame))
+}
+
+fn find_sse_frame_delimiter(buffer: &[u8]) -> Option<(usize, usize)> {
+    buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2))
+        .or_else(|| {
+            buffer
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| (index, 4))
+        })
+}
+
 async fn try_send_stream_event(sender: &mpsc::Sender<ChatEvent>, event: ChatEvent) -> bool {
     sender.send(event).await.is_ok()
 }
@@ -3172,6 +3226,33 @@ mod tests {
         super::append_reply_segment(&mut reply, "");
         super::append_reply_segment(&mut reply, "第二段");
         assert_eq!(reply, "第一段\n\n第二段");
+    }
+
+    #[test]
+    fn sse_frame_decoder_waits_for_complete_utf8_frame() {
+        let mut buffer = b"data: {\"choices\":[{\"delta\":{\"content\":\"".to_vec();
+        let chinese = "中".as_bytes();
+        buffer.extend_from_slice(&chinese[..2]);
+
+        assert!(super::next_sse_frame(&mut buffer).unwrap().is_none());
+
+        buffer.extend_from_slice(&chinese[2..]);
+        buffer.extend_from_slice(b"\"},\"finish_reason\":null}]}\n\n");
+
+        let frame = super::next_sse_frame(&mut buffer).unwrap().unwrap();
+
+        assert!(frame.contains("中"));
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn sse_frame_decoder_accepts_crlf_delimiters() {
+        let mut buffer = b"data: [DONE]\r\n\r\nnext".to_vec();
+
+        let frame = super::next_sse_frame(&mut buffer).unwrap().unwrap();
+
+        assert_eq!(frame, "data: [DONE]");
+        assert_eq!(buffer, b"next");
     }
 
     #[test]
