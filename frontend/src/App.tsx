@@ -37,6 +37,7 @@ import {
   DEFAULT_MEMORY_USER_ID,
   NAV_GROUPS,
   SETTINGS_KEY,
+  buildMcpPreviewQueryParams,
   buildFormData,
   collectDownloadFiles,
   createDefaultSkillDraft,
@@ -964,7 +965,8 @@ export default function App() {
       draftMcpDisabledUrls,
       draftMcpLazyUrls,
       [],
-      draftMemoryUserId
+      draftMemoryUserId,
+      { ignoreUserPermissions: true }
     )
       .then((data) => {
         if (cancelled) {
@@ -1173,7 +1175,8 @@ export default function App() {
       draftMcpDisabledUrls,
       draftMcpLazyUrls,
       [],
-      draftMemoryUserId
+      draftMemoryUserId,
+      { ignoreUserPermissions: true }
     );
     const servers = normalizeMcpPreviewServers(data.servers);
     const { okCount, totalServers, totalTools } = summarizeMcpServers(servers);
@@ -5802,39 +5805,19 @@ async function fetchMcpPreview(
   disabledUrls: string[] = [],
   lazyUrls: string[] = [],
   userPermissions: AppSettings["mcpUserPermissions"] = [],
-  userId = ""
+  userId = "",
+  options: { ignoreUserPermissions?: boolean } = {}
 ) {
   const target = normalizeApiBase(apiBase || DEFAULT_SETTINGS.apiBase);
-  const params = new URLSearchParams();
-  const trimmedConfigPath = configPath.trim();
-  if (trimmedConfigPath) {
-    params.set("config_path", trimmedConfigPath);
-  }
-  const baseUrls = parseMcpBaseUrlsInput(rawBaseUrls);
-  if (baseUrls.length) {
-    params.set("base_urls", JSON.stringify(baseUrls));
-  }
-  const normalizedDisabled = normalizeMcpUrlList(disabledUrls);
-  if (normalizedDisabled.length) {
-    params.set("disabled_urls", JSON.stringify(normalizedDisabled));
-  }
-  const normalizedLazy = normalizeMcpUrlList(
-    lazyUrls.filter((item) => !normalizedDisabled.includes(normalizeMcpEndpoint(item)))
-  );
-  if (normalizedLazy.length) {
-    params.set("lazy_urls", JSON.stringify(normalizedLazy));
-  }
-  const normalizedUserId = userId.trim() || DEFAULT_MEMORY_USER_ID;
-  if (normalizedUserId) {
-    params.set("user_id", normalizedUserId);
-  }
-  const permission = userPermissions.find((item) => item.userId === normalizedUserId);
-  if (permission?.allowedTools.length) {
-    params.set("allowed_tools", JSON.stringify(permission.allowedTools));
-  }
-  if (permission?.deniedTools.length) {
-    params.set("denied_tools", JSON.stringify(permission.deniedTools));
-  }
+  const params = buildMcpPreviewQueryParams({
+    configPath,
+    rawBaseUrls,
+    disabledUrls,
+    lazyUrls,
+    userPermissions,
+    userId,
+    ignoreUserPermissions: options.ignoreUserPermissions
+  });
 
   const query = params.toString();
   const response = await fetch(`${target}/agent/settings/mcp${query ? `?${query}` : ""}`);

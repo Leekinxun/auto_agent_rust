@@ -75,6 +75,7 @@ struct McpSettingsQuery {
     user_id: Option<String>,
     allowed_tools: Option<String>,
     denied_tools: Option<String>,
+    ignore_user_permissions: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -114,8 +115,12 @@ async fn agent_mcp_settings(
     Query(query): Query<McpSettingsQuery>,
 ) -> ApiResult<Json<crate::domain::chat::models::McpSettingsPreview>> {
     let settings = load_shared_frontend_settings(&state.repo_root).await?;
-    let user_mcp_permissions =
-        resolve_user_mcp_permissions(&settings.mcp_user_permissions, query.user_id.as_deref());
+    let ignore_user_permissions = query.ignore_user_permissions.unwrap_or(false);
+    let user_mcp_permissions = if ignore_user_permissions {
+        UserMcpPermissions::default()
+    } else {
+        resolve_user_mcp_permissions(&settings.mcp_user_permissions, query.user_id.as_deref())
+    };
     let allowed_tools = parse_string_list(query.allowed_tools.as_deref(), "allowed_tools")?;
     let denied_tools = parse_string_list(query.denied_tools.as_deref(), "denied_tools")?;
     let overrides = McpOverrides {
@@ -123,12 +128,16 @@ async fn agent_mcp_settings(
         base_urls: parse_mcp_base_urls(query.base_urls.as_deref())?,
         disabled_urls: parse_mcp_base_urls(query.disabled_urls.as_deref())?,
         lazy_urls: parse_mcp_base_urls(query.lazy_urls.as_deref())?,
-        allowed_tools: if allowed_tools.is_empty() {
+        allowed_tools: if ignore_user_permissions {
+            Vec::new()
+        } else if allowed_tools.is_empty() {
             user_mcp_permissions.allowed_tools
         } else {
             allowed_tools
         },
-        denied_tools: if denied_tools.is_empty() {
+        denied_tools: if ignore_user_permissions {
+            Vec::new()
+        } else if denied_tools.is_empty() {
             user_mcp_permissions.denied_tools
         } else {
             denied_tools

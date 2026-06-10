@@ -197,6 +197,66 @@ export function parseMcpBaseUrlsInput(value: string) {
     });
 }
 
+function normalizeMcpEndpointList(values: string[]) {
+  const seen = new Set<string>();
+  return values
+    .map((value) => normalizeMcpEndpoint(value))
+    .filter((value) => value.length > 0)
+    .filter((value) => {
+      if (seen.has(value)) {
+        return false;
+      }
+      seen.add(value);
+      return true;
+    });
+}
+
+export function buildMcpPreviewQueryParams(input: {
+  configPath: string;
+  rawBaseUrls: string;
+  disabledUrls?: string[];
+  lazyUrls?: string[];
+  userPermissions?: AppSettings["mcpUserPermissions"];
+  userId?: string;
+  ignoreUserPermissions?: boolean;
+}) {
+  const params = new URLSearchParams();
+  const trimmedConfigPath = input.configPath.trim();
+  if (trimmedConfigPath) {
+    params.set("config_path", trimmedConfigPath);
+  }
+  const baseUrls = parseMcpBaseUrlsInput(input.rawBaseUrls);
+  if (baseUrls.length) {
+    params.set("base_urls", JSON.stringify(baseUrls));
+  }
+  const normalizedDisabled = normalizeMcpEndpointList(input.disabledUrls ?? []);
+  if (normalizedDisabled.length) {
+    params.set("disabled_urls", JSON.stringify(normalizedDisabled));
+  }
+  const normalizedLazy = normalizeMcpEndpointList(
+    (input.lazyUrls ?? []).filter((item) => !normalizedDisabled.includes(normalizeMcpEndpoint(item)))
+  );
+  if (normalizedLazy.length) {
+    params.set("lazy_urls", JSON.stringify(normalizedLazy));
+  }
+  const normalizedUserId = (input.userId ?? "").trim() || DEFAULT_MEMORY_USER_ID;
+  if (normalizedUserId) {
+    params.set("user_id", normalizedUserId);
+  }
+  if (input.ignoreUserPermissions) {
+    params.set("ignore_user_permissions", "true");
+    return params;
+  }
+  const permission = (input.userPermissions ?? []).find((item) => item.userId === normalizedUserId);
+  if (permission?.allowedTools.length) {
+    params.set("allowed_tools", JSON.stringify(permission.allowedTools));
+  }
+  if (permission?.deniedTools.length) {
+    params.set("denied_tools", JSON.stringify(permission.deniedTools));
+  }
+  return params;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }

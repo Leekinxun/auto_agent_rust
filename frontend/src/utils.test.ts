@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   CHAT_MODES,
+  buildMcpPreviewQueryParams,
   buildFormData,
   collectDownloadFiles,
   createInitialChats,
@@ -138,6 +139,41 @@ describe("frontend chat surface", () => {
       "http://a/mcp",
       "http://b/mcp"
     ]);
+  });
+
+  it("builds unfiltered MCP catalog preview query params for settings selectors", () => {
+    const params = buildMcpPreviewQueryParams({
+      configPath: " /tmp/mcp.json ",
+      rawBaseUrls: "http://a/mcp\nhttp://b/mcp, http://a/mcp",
+      disabledUrls: ["http://b/mcp/"],
+      lazyUrls: ["http://a/mcp/", "http://b/mcp/"],
+      userId: "user-1",
+      userPermissions: [{ userId: "user-1", allowedTools: ["mcp_a__tool_a"], deniedTools: ["mcp_b__tool_b"] }],
+      ignoreUserPermissions: true
+    });
+
+    expect(params.get("config_path")).toBe("/tmp/mcp.json");
+    expect(params.get("base_urls")).toBe('["http://a/mcp","http://b/mcp"]');
+    expect(params.get("disabled_urls")).toBe('["http://b/mcp"]');
+    expect(params.get("lazy_urls")).toBe('["http://a/mcp"]');
+    expect(params.get("user_id")).toBe("user-1");
+    expect(params.get("ignore_user_permissions")).toBe("true");
+    expect(params.has("allowed_tools")).toBe(false);
+    expect(params.has("denied_tools")).toBe(false);
+  });
+
+  it("builds permission-filtered MCP preview query params for effective chat checks", () => {
+    const params = buildMcpPreviewQueryParams({
+      configPath: "",
+      rawBaseUrls: "http://a/mcp",
+      userId: "user-1",
+      userPermissions: [{ userId: "user-1", allowedTools: ["mcp_a__tool_a"], deniedTools: ["mcp_a__tool_b"] }]
+    });
+
+    expect(params.get("base_urls")).toBe('["http://a/mcp"]');
+    expect(params.get("allowed_tools")).toBe('["mcp_a__tool_a"]');
+    expect(params.get("denied_tools")).toBe('["mcp_a__tool_b"]');
+    expect(params.has("ignore_user_permissions")).toBe(false);
   });
 
   it("normalizes MCP preview servers from snake_case payloads", () => {
