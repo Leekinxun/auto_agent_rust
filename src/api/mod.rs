@@ -78,7 +78,7 @@ mod tests {
     use axum::Router;
     use axum::extract::Json as AxumJson;
     use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
-    use axum::routing::post;
+    use axum::routing::{get, post};
     use reqwest::multipart::{Form, Part};
     use serde_json::{Value, json};
     use std::fs;
@@ -1250,6 +1250,118 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reloaded["scope"], json!("shared"));
+
+        let remote_skill_server = spawn_server(Router::new().route(
+            "/remote/SKILL.md",
+            get(|| async {
+                "---\nname: remote_skill\ndescription: remote install skill\ntags: hub\n---\n\n# Remote Skill\nUse after hub install.\n"
+            }),
+        ))
+        .await;
+        let installed = harness
+            .client
+            .post(format!("{}/agent/skills/hub/install", harness.base_url))
+            .header("Content-Type", "application/json")
+            .body(
+                json!({
+                    "identifier": format!("{}/remote/SKILL.md", remote_skill_server.base_url),
+                    "category": "hub-test"
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(installed["skill"]["name"], json!("remote_skill"));
+        assert_eq!(installed["installation"]["source"], json!("url"));
+        assert_eq!(installed["installation"]["trust_level"], json!("community"));
+        assert_eq!(installed["installation"]["scan_verdict"], json!("safe"));
+
+        let hub_installed = harness
+            .client
+            .get(format!("{}/agent/skills/hub/installed", harness.base_url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(hub_installed["count"], json!(1));
+        assert_eq!(
+            hub_installed["installations"][0]["name"],
+            json!("remote_skill")
+        );
+
+        let hub_listed = harness
+            .client
+            .get(format!("{}/agent/skills?scope=shared", harness.base_url))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert!(
+            hub_listed["skills"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .any(|item| item["name"] == json!("remote_skill"))
+        );
+        assert!(
+            hub_listed["skills"]
+                .as_array()
+                .unwrap_or(&Vec::new())
+                .iter()
+                .all(|item| !item["path"].as_str().unwrap_or_default().contains("/.hub/"))
+        );
+
+        let blocked_delete = harness
+            .client
+            .delete(format!(
+                "{}/agent/skills/remote_skill?scope=shared",
+                harness.base_url
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(blocked_delete.status(), StatusCode::BAD_REQUEST);
+        let blocked_delete_body = blocked_delete.json::<Value>().await.unwrap();
+        assert!(
+            blocked_delete_body["detail"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("hub 卸载")
+        );
+
+        let hub_deleted = harness
+            .client
+            .delete(format!(
+                "{}/agent/skills/hub/remote_skill",
+                harness.base_url
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(hub_deleted["deleted"]["name"], json!("remote_skill"));
+        assert_eq!(
+            hub_deleted["installations"].as_array().map(Vec::len),
+            Some(0)
+        );
 
         let deleted = harness
             .client

@@ -3,17 +3,27 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 
 use crate::api::dto::skills::{
-    SkillDeleteResponse, SkillListResponse, SkillMutationResponse, SkillUpsertRequest, SkillsQuery,
+    SkillDeleteResponse, SkillHubInstallRequest, SkillHubInstallResponse,
+    SkillHubInstalledResponse, SkillHubUninstallResponse, SkillListResponse, SkillMutationResponse,
+    SkillUpsertRequest, SkillsQuery,
 };
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::SkillPermissions;
-use crate::domain::skills::models::{DeleteSkillInput, SaveSkillInput, SkillDocument, SkillScope};
+use crate::domain::skills::models::{
+    DeleteSkillInput, InstallHubSkillInput, SaveSkillInput, SkillDocument, SkillScope,
+};
 
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/skills", get(get_skills).post(create_skill))
         .route("/skills/reload", post(reload_skills))
+        .route("/skills/hub/installed", get(get_hub_installed_skills))
+        .route("/skills/hub/install", post(install_hub_skill))
+        .route(
+            "/skills/hub/{skill_name}",
+            axum::routing::delete(uninstall_hub_skill),
+        )
         .route(
             "/skills/{skill_name}",
             put(update_skill).delete(delete_skill),
@@ -99,17 +109,20 @@ async fn create_skill(
     let scope = SkillScope::normalize(payload.scope.as_deref(), payload.user_id.as_deref(), false)
         .map_err(ApiError::bad_request)?;
 
-    let skill = state.skill_service.save_skill(SaveSkillInput {
-        current_name: None,
-        name: payload.name,
-        description: payload.description,
-        tags: payload.tags,
-        trigger: payload.trigger,
-        body: payload.body,
-        folder: payload.folder,
-        scope,
-        user_id: payload.user_id.clone(),
-    })?;
+    let skill = state
+        .skill_service
+        .save_skill(SaveSkillInput {
+            current_name: None,
+            name: payload.name,
+            description: payload.description,
+            tags: payload.tags,
+            trigger: payload.trigger,
+            body: payload.body,
+            folder: payload.folder,
+            scope,
+            user_id: payload.user_id.clone(),
+        })
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let items = state
         .skill_service
         .list_items(scope, payload.user_id.as_deref())?;
@@ -131,17 +144,20 @@ async fn update_skill(
     let scope = SkillScope::normalize(payload.scope.as_deref(), payload.user_id.as_deref(), false)
         .map_err(ApiError::bad_request)?;
 
-    let skill = state.skill_service.save_skill(SaveSkillInput {
-        current_name: Some(skill_name),
-        name: payload.name,
-        description: payload.description,
-        tags: payload.tags,
-        trigger: payload.trigger,
-        body: payload.body,
-        folder: payload.folder,
-        scope,
-        user_id: payload.user_id.clone(),
-    })?;
+    let skill = state
+        .skill_service
+        .save_skill(SaveSkillInput {
+            current_name: Some(skill_name),
+            name: payload.name,
+            description: payload.description,
+            tags: payload.tags,
+            trigger: payload.trigger,
+            body: payload.body,
+            folder: payload.folder,
+            scope,
+            user_id: payload.user_id.clone(),
+        })
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let items = state
         .skill_service
         .list_items(scope, payload.user_id.as_deref())?;
@@ -163,11 +179,14 @@ async fn delete_skill(
     let scope = SkillScope::normalize(query.scope.as_deref(), query.user_id.as_deref(), false)
         .map_err(ApiError::bad_request)?;
 
-    let deleted = state.skill_service.delete_skill(DeleteSkillInput {
-        name: skill_name,
-        scope,
-        user_id: query.user_id.clone(),
-    })?;
+    let deleted = state
+        .skill_service
+        .delete_skill(DeleteSkillInput {
+            name: skill_name,
+            scope,
+            user_id: query.user_id.clone(),
+        })
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
     let items = state
         .skill_service
         .list_items(scope, query.user_id.as_deref())?;
@@ -192,5 +211,68 @@ async fn reload_skills(State(state): State<SharedState>) -> ApiResult<Json<Skill
         skills: items,
         scope: SkillScope::Shared,
         user_id: None,
+    }))
+}
+
+async fn get_hub_installed_skills(
+    State(state): State<SharedState>,
+) -> ApiResult<Json<SkillHubInstalledResponse>> {
+    let installations = state.skill_service.list_hub_installations()?;
+    Ok(Json(SkillHubInstalledResponse {
+        count: installations.len(),
+        installations,
+    }))
+}
+
+async fn install_hub_skill(
+    State(state): State<SharedState>,
+    Json(payload): Json<SkillHubInstallRequest>,
+) -> ApiResult<Json<SkillHubInstallResponse>> {
+    if payload.identifier.trim().is_empty() {
+        return Err(ApiError::bad_request("identifier 不能为空"));
+    }
+    let result = state
+        .skill_service
+        .install_hub_skill(InstallHubSkillInput {
+            identifier: payload.identifier,
+            source: payload.source,
+            name_override: payload.name_override,
+            category: payload.category,
+            force: payload.force,
+        })
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let items = state.skill_service.list_items(SkillScope::Shared, None)?;
+    let installations = state.skill_service.list_hub_installations()?;
+
+    Ok(Json(SkillHubInstallResponse {
+        count: items.len(),
+        skill: result.skill,
+        installation: result.installation,
+        skills: items,
+        installations,
+        scope: SkillScope::Shared,
+    }))
+}
+
+async fn uninstall_hub_skill(
+    State(state): State<SharedState>,
+    Path(skill_name): Path<String>,
+) -> ApiResult<Json<SkillHubUninstallResponse>> {
+    let result = state
+        .skill_service
+        .uninstall_hub_skill(&skill_name)
+        .await
+        .map_err(|error| ApiError::bad_request(error.to_string()))?;
+    let items = state.skill_service.list_items(SkillScope::Shared, None)?;
+    let installations = state.skill_service.list_hub_installations()?;
+
+    Ok(Json(SkillHubUninstallResponse {
+        count: items.len(),
+        deleted: result.deleted,
+        installation: result.installation,
+        skills: items,
+        installations,
+        scope: SkillScope::Shared,
     }))
 }

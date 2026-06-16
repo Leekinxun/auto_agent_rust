@@ -7,7 +7,10 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::domain::chat::models::SkillUsage;
-use crate::domain::skills::models::{DeleteSkillInput, SaveSkillInput, SkillDocument, SkillScope};
+use crate::domain::skills::models::{
+    DeleteSkillInput, InstallHubSkillInput, InstallHubSkillResult, SaveSkillInput, SkillDocument,
+    SkillHubInstallRecord, SkillScope, UninstallHubSkillResult,
+};
 use crate::infra::fs::skill_store::FileSkillStore;
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{ChatCompletionRequest, ChatMessage};
@@ -40,6 +43,25 @@ impl SkillService {
 
     pub fn delete_skill(&self, input: DeleteSkillInput) -> Result<SkillDocument> {
         self.store.delete_skill(input)
+    }
+
+    pub async fn install_hub_skill(
+        &self,
+        input: InstallHubSkillInput,
+    ) -> Result<InstallHubSkillResult> {
+        let lock = self.user_lock("__hub__");
+        let _guard = lock.lock().await;
+        self.store.install_hub_skill(input).await
+    }
+
+    pub fn list_hub_installations(&self) -> Result<Vec<SkillHubInstallRecord>> {
+        self.store.list_hub_installations()
+    }
+
+    pub async fn uninstall_hub_skill(&self, name: &str) -> Result<UninstallHubSkillResult> {
+        let lock = self.user_lock("__hub__");
+        let _guard = lock.lock().await;
+        self.store.uninstall_hub_skill(name)
     }
 
     pub fn get_resolved_skill(&self, name: &str, user_id: Option<&str>) -> Result<SkillDocument> {

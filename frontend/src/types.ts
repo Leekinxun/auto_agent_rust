@@ -166,6 +166,20 @@ export type SkillItem = {
   scope?: SkillScope;
 };
 
+export type SkillHubInstallRecord = {
+  name: string;
+  source: string;
+  identifier: string;
+  trust_level: string;
+  scan_verdict: string;
+  content_hash: string;
+  install_path: string;
+  files: string[];
+  metadata: Record<string, string>;
+  installed_at: string;
+  updated_at: string;
+};
+
 export type SkillDraft = {
   name: string;
   description: string;

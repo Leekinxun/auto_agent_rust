@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -87,4 +87,40 @@ pub struct DeleteSkillInput {
     pub name: String,
     pub scope: SkillScope,
     pub user_id: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallHubSkillInput {
+    pub identifier: String,
+    pub source: Option<String>,
+    pub name_override: Option<String>,
+    pub category: Option<String>,
+    pub force: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillHubInstallRecord {
+    pub name: String,
+    pub source: String,
+    pub identifier: String,
+    pub trust_level: String,
+    pub scan_verdict: String,
+    pub content_hash: String,
+    pub install_path: String,
+    pub files: Vec<String>,
+    pub metadata: BTreeMap<String, String>,
+    pub installed_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct InstallHubSkillResult {
+    pub skill: SkillDocument,
+    pub installation: SkillHubInstallRecord,
+}
+
+#[derive(Debug, Clone)]
+pub struct UninstallHubSkillResult {
+    pub deleted: SkillDocument,
+    pub installation: SkillHubInstallRecord,
 }

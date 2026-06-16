@@ -26,6 +26,7 @@ import type {
   ProcessItem,
   QueuedChatSubmission,
   McpServerPreview,
+  SkillHubInstallRecord,
   SkillEditorState,
   SkillItem,
   SkillScope,
@@ -759,6 +760,10 @@ export default function App() {
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsSaving, setSkillsSaving] = useState(false);
   const [skillsDeleting, setSkillsDeleting] = useState(false);
+  const [skillHubInstallations, setSkillHubInstallations] = useState<SkillHubInstallRecord[]>([]);
+  const [skillHubLoading, setSkillHubLoading] = useState(false);
+  const [skillHubInstalling, setSkillHubInstalling] = useState(false);
+  const [skillHubUninstalling, setSkillHubUninstalling] = useState<string | null>(null);
   const [skillEditor, setSkillEditor] = useState<SkillEditorState>(loadSkillEditor);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [promptPreview, setPromptPreview] = useState<PromptPreviewState>({
@@ -1020,6 +1025,7 @@ export default function App() {
   useEffect(() => {
     if (currentView === "skills") {
       void loadSkills();
+      void loadSkillHubInstallations();
     }
   }, [currentView, settings.apiBase, settings.memoryUserId, settings.skillUserPermissions, skillScope]);
 
@@ -1246,10 +1252,10 @@ export default function App() {
     return `/agent/skills?${params.toString()}`;
   }
 
-  async function loadSkills(silent = true) {
+  async function loadSkills(silent = true, scope: SkillScope = skillScope) {
     setSkillsLoading(true);
     try {
-      const data = await fetchJson<{ skills?: SkillItem[] }>(buildSkillsPath());
+      const data = await fetchJson<{ skills?: SkillItem[] }>(buildSkillsPath(scope));
       const items = Array.isArray(data.skills) ? data.skills : [];
       setSkills(items);
       setSkillEditor((editor) => {
@@ -1270,6 +1276,136 @@ export default function App() {
       }
     } finally {
       setSkillsLoading(false);
+    }
+  }
+
+  async function loadSkillHubInstallations(silent = true) {
+    setSkillHubLoading(true);
+    try {
+      const data = await fetchJson<{ installations?: SkillHubInstallRecord[] }>("/agent/skills/hub/installed");
+      const installations = Array.isArray(data.installations) ? data.installations : [];
+      setSkillHubInstallations(installations);
+    } catch (error) {
+      if (!silent) {
+        showToast(getErrorMessage(error), "error");
+      }
+    } finally {
+      setSkillHubLoading(false);
+    }
+  }
+
+  async function installHubSkill(input: {
+    identifier: string;
+    source?: string;
+    nameOverride?: string;
+    category?: string;
+    force?: boolean;
+  }): Promise<boolean> {
+    const identifier = input.identifier.trim();
+    if (!identifier) {
+      showToast("URL 不能为空", "error");
+      return false;
+    }
+
+    setSkillHubInstalling(true);
+    try {
+      const data = await fetchJson<{
+        skill?: SkillItem;
+        skills?: SkillItem[];
+        installation?: SkillHubInstallRecord;
+        installations?: SkillHubInstallRecord[];
+      }>("/agent/skills/hub/install", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          identifier,
+          source: input.source || "url",
+          name_override: input.nameOverride?.trim() || undefined,
+          category: input.category?.trim() || undefined,
+          force: Boolean(input.force)
+        })
+      });
+
+      const nextInstallations = Array.isArray(data.installations) ? data.installations : [];
+      setSkillHubInstallations(nextInstallations);
+
+      const nextSkills = Array.isArray(data.skills) ? data.skills : [];
+      setSkillScope("shared");
+      if (nextSkills.length) {
+        setSkills(nextSkills);
+      } else {
+        await loadSkills(true, "shared");
+      }
+
+      if (data.skill) {
+        setSkillEditor(createEditorState(data.skill));
+        navigate(getSkillDetailPath(data.skill.name));
+      }
+
+      showToast(`Hub Skill 已安装：${data.skill?.name || identifier}`, "success");
+      return true;
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      return false;
+    } finally {
+      setSkillHubInstalling(false);
+    }
+  }
+
+  async function uninstallHubSkill(skillName: string): Promise<boolean> {
+    const cleanName = skillName.trim();
+    if (!cleanName || skillHubUninstalling) {
+      return false;
+    }
+
+    const confirmed = window.confirm(`确认从 hub 卸载 skill "${cleanName}" 吗？这会删除 shared skills 中对应目录。`);
+    if (!confirmed) {
+      return false;
+    }
+
+    setSkillHubUninstalling(cleanName);
+    try {
+      const data = await fetchJson<{
+        deleted?: SkillItem;
+        skills?: SkillItem[];
+        installation?: SkillHubInstallRecord;
+        installations?: SkillHubInstallRecord[];
+      }>(`/agent/skills/hub/${encodeURIComponent(cleanName)}`, {
+        method: "DELETE"
+      });
+
+      const nextInstallations = Array.isArray(data.installations) ? data.installations : [];
+      setSkillHubInstallations(nextInstallations);
+
+      setSkillScope("shared");
+      const nextSkills = Array.isArray(data.skills) ? data.skills : [];
+      if (nextSkills.length) {
+        setSkills(nextSkills);
+      } else {
+        await loadSkills(true, "shared");
+      }
+
+      if (data.deleted) {
+        const stillExists = nextSkills.some((item) => item.name === data.deleted?.name);
+        if (!stillExists) {
+          setSkillEditor(nextSkills.length ? createEditorState(nextSkills[0]) : createEditorState());
+          if (nextSkills.length) {
+            navigate(getSkillDetailPath(nextSkills[0].name));
+          } else {
+            navigate("/skills");
+          }
+        }
+      }
+
+      showToast(`Hub Skill 已卸载：${cleanName}`, "success");
+      return true;
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+      return false;
+    } finally {
+      setSkillHubUninstalling(null);
     }
   }
 
@@ -2251,6 +2387,10 @@ export default function App() {
                   <SkillsWorkspace
                     deleting={skillsDeleting}
                     editor={skillEditor}
+                    hubInstallations={skillHubInstallations}
+                    hubInstalling={skillHubInstalling}
+                    hubLoading={skillHubLoading}
+                    hubUninstalling={skillHubUninstalling}
                     items={skills}
                     loading={skillsLoading}
                     onCreate={() => {
@@ -2258,6 +2398,9 @@ export default function App() {
                       navigate(SKILL_CREATE_PATH);
                     }}
                     onEditorChange={setSkillEditor}
+                    onHubInstall={(input) => installHubSkill(input)}
+                    onHubReload={() => void loadSkillHubInstallations(false)}
+                    onHubUninstall={(skillName) => uninstallHubSkill(skillName)}
                     onReload={() => void loadSkills(false)}
                     onReset={() => {
                       if (skillEditor.mode === "edit" && skillEditor.originalName) {
@@ -2290,6 +2433,10 @@ export default function App() {
                   <SkillsWorkspace
                     deleting={skillsDeleting}
                     editor={skillEditor}
+                    hubInstallations={skillHubInstallations}
+                    hubInstalling={skillHubInstalling}
+                    hubLoading={skillHubLoading}
+                    hubUninstalling={skillHubUninstalling}
                     items={skills}
                     loading={skillsLoading}
                     onCreate={() => {
@@ -2297,6 +2444,9 @@ export default function App() {
                       navigate(SKILL_CREATE_PATH);
                     }}
                     onEditorChange={setSkillEditor}
+                    onHubInstall={(input) => installHubSkill(input)}
+                    onHubReload={() => void loadSkillHubInstallations(false)}
+                    onHubUninstall={(skillName) => uninstallHubSkill(skillName)}
                     onReload={() => void loadSkills(false)}
                     onReset={() => setSkillEditor(createEditorState())}
                     onDelete={() => void deleteSkill()}
@@ -2322,6 +2472,10 @@ export default function App() {
                   <SkillsWorkspace
                     deleting={skillsDeleting}
                     editor={skillEditor}
+                    hubInstallations={skillHubInstallations}
+                    hubInstalling={skillHubInstalling}
+                    hubLoading={skillHubLoading}
+                    hubUninstalling={skillHubUninstalling}
                     items={skills}
                     loading={skillsLoading}
                     onCreate={() => {
@@ -2329,6 +2483,9 @@ export default function App() {
                       navigate(SKILL_CREATE_PATH);
                     }}
                     onEditorChange={setSkillEditor}
+                    onHubInstall={(input) => installHubSkill(input)}
+                    onHubReload={() => void loadSkillHubInstallations(false)}
+                    onHubUninstall={(skillName) => uninstallHubSkill(skillName)}
                     onReload={() => void loadSkills(false)}
                     onReset={() => {
                       if (skillEditor.mode === "edit" && skillEditor.originalName) {
@@ -3438,22 +3595,62 @@ function SkillsWorkspace(props: {
   loading: boolean;
   saving: boolean;
   deleting: boolean;
+  hubInstallations: SkillHubInstallRecord[];
+  hubLoading: boolean;
+  hubInstalling: boolean;
+  hubUninstalling: string | null;
   editor: SkillEditorState;
   onSelect: (skill: SkillItem) => void;
   onCreate: () => void;
   onReload: () => void;
+  onHubReload: () => void;
+  onHubInstall: (input: {
+    identifier: string;
+    source?: string;
+    nameOverride?: string;
+    category?: string;
+    force?: boolean;
+  }) => Promise<boolean>;
+  onHubUninstall: (skillName: string) => Promise<boolean>;
   onReset: () => void;
   onDelete: () => void;
   onSave: () => void;
   onScopeChange: (scope: SkillScope) => void;
   onEditorChange: (editor: SkillEditorState) => void;
 }) {
-  const { deleting, editor, items, loading, onCreate, onDelete, onEditorChange, onReload, onReset, onSave, onScopeChange, onSelect, saving, scope, userId } = props;
+  const {
+    deleting,
+    editor,
+    hubInstallations,
+    hubInstalling,
+    hubLoading,
+    hubUninstalling,
+    items,
+    loading,
+    onCreate,
+    onDelete,
+    onEditorChange,
+    onHubInstall,
+    onHubReload,
+    onHubUninstall,
+    onReload,
+    onReset,
+    onSave,
+    onScopeChange,
+    onSelect,
+    saving,
+    scope,
+    userId
+  } = props;
   const location = useLocation();
   const params = useParams<{ skillName: string }>();
   const isCreateRoute = location.pathname === SKILL_CREATE_PATH;
   const routedSkillName = params.skillName ? decodeURIComponent(params.skillName) : null;
   const [query, setQuery] = useState("");
+  const [hubIdentifier, setHubIdentifier] = useState("");
+  const [hubNameOverride, setHubNameOverride] = useState("");
+  const [hubCategory, setHubCategory] = useState("");
+  const [hubForce, setHubForce] = useState(false);
   const scopeLabel = scope === "private" ? "用户私有" : "公用";
   const scopeDescription = scope === "private" ? `user_id: ${userId}` : "所有用户共享";
 
@@ -3462,6 +3659,9 @@ function SkillsWorkspace(props: {
     : editor.mode === "edit" && editor.originalName
       ? items.find((item) => item.name === editor.originalName) || null
       : null;
+  const selectedHubInstallation = selectedSkill
+    ? hubInstallations.find((installation) => installation.name === selectedSkill.name) || null
+    : null;
 
   const filteredItems = items.filter((item) => {
     if (!query.trim()) {
@@ -3530,6 +3730,142 @@ function SkillsWorkspace(props: {
           {selectedSkill ? <span className="soft-chip">当前：{selectedSkill.name}</span> : null}
         </div>
 
+        <div className="hub-install-card">
+          <div className="section-head">
+            <div>
+              <h3>Hub 安装</h3>
+              <span>仅支持 URL 安装，结果会写入 shared skills/.hub/lock.json</span>
+            </div>
+            <div className="button-row">
+              <span className="soft-chip">{hubLoading ? "加载中..." : `${hubInstallations.length} 个已安装`}</span>
+              <button className="button secondary" disabled={hubLoading} onClick={onHubReload} type="button">
+                刷新 hub
+              </button>
+            </div>
+          </div>
+
+          <div className="hub-install-form">
+            <label className="field">
+              <span>SKILL.md URL</span>
+              <input
+                onChange={(event) => setHubIdentifier(event.target.value)}
+                placeholder="https://example.com/skill/SKILL.md"
+                value={hubIdentifier}
+              />
+            </label>
+
+            <div className="form-grid">
+              <label className="field">
+                <span>名称覆盖</span>
+                <input
+                  onChange={(event) => setHubNameOverride(event.target.value)}
+                  placeholder="可选，覆盖 frontmatter.name"
+                  value={hubNameOverride}
+                />
+              </label>
+              <label className="field">
+                <span>分类目录</span>
+                <input
+                  onChange={(event) => setHubCategory(event.target.value)}
+                  placeholder="例如：productivity/tools"
+                  value={hubCategory}
+                />
+              </label>
+            </div>
+
+            <label className="checkbox-field field">
+              <span>
+                <input checked={hubForce} onChange={(event) => setHubForce(event.target.checked)} type="checkbox" />
+                覆盖已有同名 hub skill
+              </span>
+              <small>警告内容需勾选后才会继续安装；危险内容始终会被 Skills Guard 拒绝。</small>
+            </label>
+
+            <div className="button-row">
+              <button
+                className="button primary"
+                disabled={hubInstalling || !hubIdentifier.trim()}
+                onClick={async () => {
+                  const ok = await onHubInstall({
+                    identifier: hubIdentifier,
+                    nameOverride: hubNameOverride,
+                    category: hubCategory,
+                    force: hubForce
+                  });
+                  if (ok) {
+                    setHubIdentifier("");
+                    setHubNameOverride("");
+                    setHubCategory("");
+                    setHubForce(false);
+                  }
+                }}
+                type="button"
+              >
+                {hubInstalling ? "安装中..." : "安装 Hub Skill"}
+              </button>
+              <button
+                className="button ghost"
+                onClick={() => {
+                  setHubIdentifier("");
+                  setHubNameOverride("");
+                  setHubCategory("");
+                  setHubForce(false);
+                }}
+                type="button"
+              >
+                清空
+              </button>
+            </div>
+          </div>
+
+          <div className="hub-install-list">
+            {hubLoading ? (
+              <div className="empty-block">正在加载 hub 安装记录...</div>
+            ) : hubInstallations.length ? (
+              hubInstallations.map((installation) => (
+                <article className="hub-install-item" key={installation.name}>
+                  <div className="section-head hub-install-head">
+                    <div>
+                      <strong>{installation.name}</strong>
+                      <span>{installation.install_path}</span>
+                    </div>
+                    <button
+                      className="button danger"
+                      disabled={hubUninstalling !== null}
+                      onClick={async () => {
+                        await onHubUninstall(installation.name);
+                      }}
+                      type="button"
+                    >
+                      {hubUninstalling === installation.name ? "卸载中..." : "卸载"}
+                    </button>
+                  </div>
+                  <div className="skill-card-meta">
+                    <span className="soft-chip">{installation.source}</span>
+                    <span className={`soft-chip ${installation.scan_verdict !== "safe" ? "soft-chip-attention" : ""}`}>
+                      {installation.scan_verdict}
+                    </span>
+                    <span className="soft-chip">{installation.trust_level}</span>
+                    <span className="soft-chip">{installation.content_hash}</span>
+                  </div>
+                  <div className="hub-install-meta">
+                    <div className="preview-meta-item">
+                      <strong>URL</strong>
+                      <ExpandableInlineValue tone="light" value={installation.identifier} />
+                    </div>
+                    <div className="preview-meta-item">
+                      <strong>更新于</strong>
+                      <span>{installation.updated_at}</span>
+                    </div>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <div className="empty-block">暂无 hub 安装记录。</div>
+            )}
+          </div>
+        </div>
+
         <div className="skills-scroll">
           {loading ? (
             <div className="empty-block">正在加载 skills 列表...</div>
@@ -3562,7 +3898,18 @@ function SkillsWorkspace(props: {
           </div>
           <div className="button-row">
             <span className={`soft-chip ${isDirty ? "soft-chip-attention" : ""}`}>{isDirty ? "有未保存改动" : "已同步"}</span>
-            {editor.mode === "edit" && selectedSkill ? (
+            {editor.mode === "edit" && selectedSkill && selectedHubInstallation ? (
+              <button
+                className="button danger"
+                disabled={saving || deleting || hubUninstalling !== null}
+                onClick={async () => {
+                  await onHubUninstall(selectedSkill.name);
+                }}
+                type="button"
+              >
+                {hubUninstalling === selectedSkill.name ? "卸载中..." : "Hub 卸载"}
+              </button>
+            ) : editor.mode === "edit" && selectedSkill ? (
               <button className="button danger" disabled={saving || deleting} onClick={onDelete} type="button">
                 {deleting ? "删除中..." : "删除"}
               </button>
