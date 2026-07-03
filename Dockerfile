@@ -13,6 +13,12 @@ FROM rust:1.94-bookworm AS backend-builder
 
 WORKDIR /app
 
+# 使用中科大镜像加速 crates.io 下载
+RUN echo '[source.crates-io]' > /root/.cargo/config.toml && \
+    echo 'replace-with = "ustc"' >> /root/.cargo/config.toml && \
+    echo '[source.ustc]' >> /root/.cargo/config.toml && \
+    echo 'registry = "sparse+https://mirrors.ustc.edu.cn/crates.io-index/"' >> /root/.cargo/config.toml
+
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release
