@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use walkdir::WalkDir;
 
-use crate::domain::skills::models::{DeleteSkillInput, SaveSkillInput, SkillDocument, SkillScope};
+use crate::domain::skills::models::{
+    DeleteSkillInput, RewritePrivateSkillInput, SaveSkillInput, SkillDocument, SkillScope,
+};
 use crate::domain::skills::parser::{parse_frontmatter, render_frontmatter};
 use crate::infra::fs::user_memory_store::FileMemoryStore;
 use crate::support::sanitize::sanitize_skill_folder;
@@ -147,6 +149,71 @@ impl FileSkillStore {
 
     pub fn get_private_skill(&self, user_id: &str, name: &str) -> Result<SkillDocument> {
         self.get_item(name, SkillScope::Private, Some(user_id))
+    }
+
+    pub fn get_shared_skill(&self, name: &str) -> Result<SkillDocument> {
+        self.get_item(name, SkillScope::Shared, None)
+    }
+
+    pub fn reset_private_skill_from_shared(
+        &self,
+        user_id: &str,
+        name: &str,
+        meta_updates: &BTreeMap<String, String>,
+    ) -> Result<SkillDocument> {
+        let shared = self.get_shared_skill(name)?;
+        let target_dir = match self.get_private_skill(user_id, name) {
+            Ok(existing) => PathBuf::from(&existing.path)
+                .parent()
+                .with_context(|| format!("invalid skill path: {}", existing.path))?
+                .to_path_buf(),
+            Err(_) => {
+                let root_dir = self.private_root(user_id)?;
+                std::fs::create_dir_all(&root_dir)
+                    .with_context(|| format!("failed to create {}", root_dir.display()))?;
+                let preferred_folder = sanitize_skill_folder(&shared.folder)?;
+                next_available_dir(&root_dir, &preferred_folder)
+            }
+        };
+
+        let mut meta = shared.meta.clone();
+        merge_meta(&mut meta, meta_updates);
+        std::fs::create_dir_all(&target_dir)
+            .with_context(|| format!("failed to create {}", target_dir.display()))?;
+        let skill_path = target_dir.join("SKILL.md");
+        std::fs::write(&skill_path, render_frontmatter(&meta, &shared.body))
+            .with_context(|| format!("failed to write {}", skill_path.display()))?;
+        tracing::info!(
+            user_id,
+            skill = shared.name.as_str(),
+            path = %skill_path.display(),
+            "private skill reset from shared baseline"
+        );
+
+        self.get_item(name, SkillScope::Private, Some(user_id))
+    }
+
+    pub fn rewrite_private_skill(&self, input: RewritePrivateSkillInput) -> Result<SkillDocument> {
+        let normalized = input.body.trim();
+        if normalized.is_empty() {
+            bail!("Skill body cannot be empty");
+        }
+
+        let skill = self.get_item(&input.name, SkillScope::Private, Some(&input.user_id))?;
+        let skill_path = PathBuf::from(&skill.path);
+        let mut meta = skill.meta.clone();
+        merge_meta(&mut meta, &input.meta);
+        std::fs::write(&skill_path, render_frontmatter(&meta, normalized))
+            .with_context(|| format!("failed to write {}", skill_path.display()))?;
+        tracing::info!(
+            user_id = input.user_id.as_str(),
+            skill = skill.name.as_str(),
+            chars = normalized.len(),
+            path = %skill_path.display(),
+            "private skill rewritten with evolution metadata"
+        );
+
+        self.get_item(&input.name, SkillScope::Private, Some(&input.user_id))
     }
 
     pub fn rewrite_private_skill_body(
@@ -308,6 +375,12 @@ fn upsert_meta(meta: &mut BTreeMap<String, String>, key: &str, value: &str) {
         meta.remove(key);
     } else {
         meta.insert(key.to_string(), value.to_string());
+    }
+}
+
+fn merge_meta(meta: &mut BTreeMap<String, String>, updates: &BTreeMap<String, String>) {
+    for (key, value) in updates {
+        upsert_meta(meta, key, value);
     }
 }
 

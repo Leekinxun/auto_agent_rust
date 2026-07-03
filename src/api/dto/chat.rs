@@ -1,8 +1,6 @@
 use serde::Serialize;
 
-use crate::domain::chat::models::{
-    HistoryEntry, OutputFile, SteeringSubmission, TokenUsageReport,
-};
+use crate::domain::chat::models::{HistoryEntry, OutputFile, SteeringSubmission, TokenUsageReport};
 use crate::domain::skills::models::SkillDocument;
 
 #[derive(Debug, Serialize)]

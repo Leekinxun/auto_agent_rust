@@ -1216,12 +1216,12 @@ mod tests {
             .header("Content-Type", "application/json")
             .body(
                 json!({
-                    "name": "private_skill",
+                    "name": "demo_skill",
                     "description": "private desc",
                     "tags": "",
                     "trigger": "",
                     "body": "# Private skill\nUser scoped.",
-                    "folder": "private_skill",
+                    "folder": "demo_skill_private",
                     "scope": "private",
                     "user_id": "agent-alias"
                 })
@@ -1237,6 +1237,75 @@ mod tests {
             .unwrap();
         assert_eq!(private_created["skill"]["scope"], json!("private"));
         assert_eq!(private_created["user_id"], json!("agent-alias"));
+
+        let evolution = harness
+            .client
+            .get(format!(
+                "{}/agent/skills/demo_skill/evolution?user_id=agent-alias",
+                harness.base_url
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(evolution["name"], json!("demo_skill"));
+        assert_eq!(evolution["has_private"], json!(true));
+        assert_eq!(evolution["effective_scope"], json!("private"));
+
+        let reset = harness
+            .client
+            .post(format!(
+                "{}/agent/skills/demo_skill/evolution/reset",
+                harness.base_url
+            ))
+            .header("Content-Type", "application/json")
+            .body(json!({ "user_id": "agent-alias", "note": "test reset" }).to_string())
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(reset["action"], json!("reset"));
+        assert_eq!(
+            reset["status"]["private"]["body"],
+            reset["status"]["shared"]["body"]
+        );
+
+        let merged = harness
+            .client
+            .post(format!(
+                "{}/agent/skills/demo_skill/evolution/merge",
+                harness.base_url
+            ))
+            .header("Content-Type", "application/json")
+            .body(
+                json!({
+                    "user_id": "agent-alias",
+                    "body": "# Private skill\nMerged user guidance.",
+                    "note": "test merge"
+                })
+                .to_string(),
+            )
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json::<Value>()
+            .await
+            .unwrap();
+        assert_eq!(merged["action"], json!("merge"));
+        assert_eq!(
+            merged["status"]["private"]["body"],
+            json!("# Private skill\nMerged user guidance.")
+        );
 
         let reloaded = harness
             .client
@@ -1270,7 +1339,7 @@ mod tests {
         let private_deleted = harness
             .client
             .delete(format!(
-                "{}/agent/skills/private_skill?scope=private&user_id=agent-alias",
+                "{}/agent/skills/demo_skill?scope=private&user_id=agent-alias",
                 harness.base_url
             ))
             .send()
@@ -1281,7 +1350,7 @@ mod tests {
             .json::<Value>()
             .await
             .unwrap();
-        assert_eq!(private_deleted["deleted"]["name"], json!("private_skill"));
+        assert_eq!(private_deleted["deleted"]["name"], json!("demo_skill"));
 
         let download_url = format!("{}/agent/download/outputs/sample.md", harness.base_url);
         let download = harness

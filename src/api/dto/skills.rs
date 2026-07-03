@@ -53,3 +53,38 @@ pub struct SkillDeleteResponse {
     pub scope: SkillScope,
     pub user_id: Option<String>,
 }
+
+#[derive(Debug, Deserialize)]
+pub struct SkillEvolutionQuery {
+    pub user_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SkillEvolutionApplyRequest {
+    pub user_id: String,
+    pub body: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillEvolutionStatusResponse {
+    pub name: String,
+    pub user_id: String,
+    pub has_private: bool,
+    pub baseline_changed: bool,
+    pub effective_scope: SkillScope,
+    pub shared_hash: Option<String>,
+    pub private_hash: Option<String>,
+    pub effective_hash: Option<String>,
+    pub baseline_hash_when_forked: Option<String>,
+    pub recommendation: String,
+    pub shared: Option<SkillDocument>,
+    pub private: Option<SkillDocument>,
+    pub effective: Option<SkillDocument>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SkillEvolutionMutationResponse {
+    pub action: String,
+    pub status: SkillEvolutionStatusResponse,
+}

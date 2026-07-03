@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -7,7 +8,9 @@ use serde_json::json;
 use tokio::sync::Mutex;
 
 use crate::domain::chat::models::SkillUsage;
-use crate::domain::skills::models::{DeleteSkillInput, SaveSkillInput, SkillDocument, SkillScope};
+use crate::domain::skills::models::{
+    DeleteSkillInput, RewritePrivateSkillInput, SaveSkillInput, SkillDocument, SkillScope,
+};
 use crate::infra::fs::skill_store::FileSkillStore;
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{ChatCompletionRequest, ChatMessage};
@@ -52,6 +55,24 @@ impl SkillService {
 
     pub fn get_private_skill(&self, user_id: &str, name: &str) -> Result<SkillDocument> {
         self.store.get_private_skill(user_id, name)
+    }
+
+    pub fn get_shared_skill(&self, name: &str) -> Result<SkillDocument> {
+        self.store.get_shared_skill(name)
+    }
+
+    pub fn reset_private_skill_from_shared(
+        &self,
+        user_id: &str,
+        name: &str,
+        meta_updates: &BTreeMap<String, String>,
+    ) -> Result<SkillDocument> {
+        self.store
+            .reset_private_skill_from_shared(user_id, name, meta_updates)
+    }
+
+    pub fn rewrite_private_skill(&self, input: RewritePrivateSkillInput) -> Result<SkillDocument> {
+        self.store.rewrite_private_skill(input)
     }
 
     pub async fn learn_from_usage(

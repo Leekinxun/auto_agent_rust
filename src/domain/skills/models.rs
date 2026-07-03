@@ -88,3 +88,11 @@ pub struct DeleteSkillInput {
     pub scope: SkillScope,
     pub user_id: Option<String>,
 }
+
+#[derive(Debug, Clone)]
+pub struct RewritePrivateSkillInput {
+    pub user_id: String,
+    pub name: String,
+    pub body: String,
+    pub meta: BTreeMap<String, String>,
+}
