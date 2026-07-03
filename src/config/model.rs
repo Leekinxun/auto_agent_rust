@@ -41,7 +41,7 @@ IMPORTANT: All user-downloadable generated files (.docx/.xlsx/.csv/.md) must be 
 pub struct AgentConfig {
     pub model_id: String,
     pub system_prompt: String,
-    pub max_tokens: u32,
+    pub max_tokens: Option<u32>,
     pub base_url: String,
     pub api_key: String,
     pub temperature: Option<f32>,
@@ -59,7 +59,7 @@ impl Default for AgentConfig {
         Self {
             model_id: "qwen2.5-72b-instruct".to_string(),
             system_prompt: default_agent_system_prompt(),
-            max_tokens: 8_000,
+            max_tokens: None,
             base_url: "http://localhost:8000/v1".to_string(),
             api_key: "EMPTY".to_string(),
             temperature: None,

@@ -124,6 +124,7 @@ impl UserMemoryService {
                     temperature: None,
                     max_tokens: Some(max_tokens),
                     top_p: None,
+                    stream_options: None,
                 })
                 .await?;
             let Some(choice) = response.choices.into_iter().next() else {

@@ -3,6 +3,7 @@ use serde::Serialize;
 use crate::domain::hitl::policy::{HitlDefaultAction, HitlPolicyRule};
 
 use crate::domain::skills::models::{SkillDocument, SkillScope};
+use crate::infra::llm::types::TokenUsage;
 use crate::infra::mcp::client::McpServerPreview;
 
 #[derive(Debug, Clone)]
@@ -195,6 +196,41 @@ pub struct ChatResult {
     pub history: Vec<HistoryEntry>,
     pub output_files: Vec<OutputFile>,
     pub skills_updated: Vec<SkillDocument>,
+    pub token_usage: Option<TokenUsageReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TokenUsageReport {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+    pub context_window: Option<u32>,
+    pub used_percent: Option<f32>,
+}
+
+impl TokenUsageReport {
+    pub fn from_usage(usage: TokenUsage, context_window: Option<u32>) -> Option<Self> {
+        if usage.prompt_tokens == 0 && usage.completion_tokens == 0 && usage.total_tokens == 0 {
+            return None;
+        }
+
+        let total_tokens = if usage.total_tokens == 0 {
+            usage.prompt_tokens.saturating_add(usage.completion_tokens)
+        } else {
+            usage.total_tokens
+        };
+        let used_percent = context_window
+            .filter(|value| *value > 0)
+            .map(|value| ((total_tokens as f64 / value as f64) * 100.0) as f32);
+
+        Some(Self {
+            prompt_tokens: usage.prompt_tokens,
+            completion_tokens: usage.completion_tokens,
+            total_tokens,
+            context_window,
+            used_percent,
+        })
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -234,6 +270,7 @@ pub enum ChatEvent {
     FilesUploaded(Vec<UploadedFile>),
     OutputFiles(Vec<OutputFile>),
     SkillsUpdated(Vec<SkillDocument>),
+    TokenUsage(TokenUsageReport),
     Done {
         finish_reason: String,
     },

@@ -1,6 +1,8 @@
 use serde::Serialize;
 
-use crate::domain::chat::models::{HistoryEntry, OutputFile, SteeringSubmission};
+use crate::domain::chat::models::{
+    HistoryEntry, OutputFile, SteeringSubmission, TokenUsageReport,
+};
 use crate::domain::skills::models::SkillDocument;
 
 #[derive(Debug, Serialize)]
@@ -8,6 +10,7 @@ pub struct AgentResponse {
     pub reply: String,
     pub history: Vec<HistoryEntry>,
     pub output_files: Vec<OutputFile>,
+    pub token_usage: Option<TokenUsageReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -16,6 +19,7 @@ pub struct MemoryAgentResponse {
     pub history: Vec<HistoryEntry>,
     pub skills_updated: Vec<SkillDocument>,
     pub output_files: Vec<OutputFile>,
+    pub token_usage: Option<TokenUsageReport>,
 }
 
 #[derive(Debug, Serialize)]

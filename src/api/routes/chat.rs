@@ -173,6 +173,7 @@ async fn agent_run(
         reply: result.reply,
         history: result.history,
         output_files: result.output_files,
+        token_usage: result.token_usage,
     }))
 }
 
@@ -193,6 +194,7 @@ async fn agent_memory_run(
         history: result.history,
         skills_updated: result.skills_updated,
         output_files: result.output_files,
+        token_usage: result.token_usage,
     }))
 }
 
@@ -813,6 +815,9 @@ fn chat_event_to_sse(event: ChatEvent) -> Event {
             "skills_updated",
             serde_json::json!({ "count": skills.len(), "skills": skills }),
         ),
+        ChatEvent::TokenUsage(usage) => {
+            sse_event("token_usage", serde_json::json!({ "token_usage": usage }))
+        }
         ChatEvent::Done { finish_reason } => sse_event(
             "done",
             serde_json::json!({ "finish_reason": finish_reason }),

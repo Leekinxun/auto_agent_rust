@@ -315,6 +315,7 @@ impl TeammateManager {
                         temperature: None,
                         max_tokens: Some(8_000),
                         top_p: None,
+                        stream_options: None,
                     })
                     .await
                 {

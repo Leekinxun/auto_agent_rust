@@ -78,7 +78,7 @@ where
         config.agent.api_key = value;
     }
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_MAX_TOKENS"]) {
-        config.agent.max_tokens = parse_positive_u32("AGENT_MAX_TOKENS", &value)?;
+        config.agent.max_tokens = Some(parse_positive_u32("AGENT_MAX_TOKENS", &value)?);
     }
     if let Some(value) = first_non_empty_env(get_env, &["AGENT_TEMPERATURE"]) {
         config.agent.temperature = Some(parse_temperature("AGENT_TEMPERATURE", &value)?);
@@ -299,7 +299,7 @@ mod tests {
         assert_eq!(config.agent.model_id, "modern-model");
         assert_eq!(config.agent.base_url, "http://llm.example/v1");
         assert_eq!(config.agent.api_key, "secret");
-        assert_eq!(config.agent.max_tokens, 9000);
+        assert_eq!(config.agent.max_tokens, Some(9000));
         assert_eq!(config.agent.temperature, Some(0.3));
         assert_eq!(config.agent.top_p, Some(0.9));
         assert_eq!(config.agent.max_iterations, 10);

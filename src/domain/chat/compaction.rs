@@ -74,6 +74,7 @@ pub async fn auto_compact(
             temperature: None,
             max_tokens: Some(AUTO_COMPACT_MAX_TOKENS),
             top_p: None,
+            stream_options: None,
         })
         .await
         .context("failed to generate compaction summary")?;

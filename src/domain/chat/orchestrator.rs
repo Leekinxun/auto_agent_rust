@@ -16,7 +16,7 @@ use crate::domain::chat::compaction::{
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
     HistoryEntry, HitlOverrides, McpServerPreviewDto, McpSettingsPreview, OutputFile,
-    SkillPermissions, SkillUsage, SystemPromptPreview,
+    SkillPermissions, SkillUsage, SystemPromptPreview, TokenUsageReport,
 };
 use crate::domain::chat::tool_context::{
     ToolContextBudget, enforce_tool_turn_budget, prepare_tool_result_for_context,
@@ -47,7 +47,8 @@ use crate::infra::fs::tool_ops::{
 };
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{
-    ChatCompletionRequest, ChatMessage, StreamChunk, ToolCall, ToolCallAccumulator,
+    ChatCompletionRequest, ChatMessage, StreamChunk, StreamOptions, TokenUsage, ToolCall,
+    ToolCallAccumulator,
 };
 use crate::infra::mcp::client::McpClient;
 use crate::infra::mcp::client::McpToolSelection;
@@ -110,6 +111,7 @@ impl ChatOrchestrator {
         let mut rounds_without_todo = 0usize;
         let mut iterations = 0usize;
         let mut tool_names = Vec::new();
+        let mut token_usage = TokenUsage::default();
         let mut final_reply_recovered = false;
         let active_run_generation = prepared
             .session
@@ -153,6 +155,7 @@ impl ChatOrchestrator {
                         &prepared.llm_overrides,
                     )?)
                     .await?;
+                add_token_usage(&mut token_usage, response.usage.as_ref());
                 let Some(choice) = response.choices.into_iter().next() else {
                     finish_reason = "empty".to_string();
                     break;
@@ -300,6 +303,9 @@ impl ChatOrchestrator {
         let output_files = extract_output_files(&self.repo_root, &reply);
         let history =
             build_response_history(&prepared.cleaned_history, &prepared.user_message, &reply);
+        let token_usage_report = self
+            .build_token_usage_report(&prepared.llm_overrides, token_usage)
+            .await;
         let skills_updated = self
             .finalize_memory_side_effects(
                 &mode,
@@ -338,6 +344,7 @@ impl ChatOrchestrator {
             history,
             output_files,
             skills_updated,
+            token_usage: token_usage_report,
         })
     }
 
@@ -357,6 +364,7 @@ impl ChatOrchestrator {
         let mut rounds_without_todo = 0usize;
         let mut iterations = 0usize;
         let mut tool_names = Vec::new();
+        let mut token_usage = TokenUsage::default();
         let mut final_reply_recovered = false;
         let mut final_finish_reason = "stop".to_string();
         let active_run_generation = prepared
@@ -433,6 +441,7 @@ impl ChatOrchestrator {
                             }
                             let chunk: StreamChunk = serde_json::from_str(&payload)
                                 .context("invalid llm stream json")?;
+                            add_token_usage(&mut token_usage, chunk.usage.as_ref());
                             for choice in chunk.choices {
                                 if let Some(content) = choice.delta.content {
                                     if !content.is_empty() {
@@ -515,6 +524,16 @@ impl ChatOrchestrator {
                     let output_files = extract_output_files(&self.repo_root, &full_reply);
                     if !output_files.is_empty() {
                         if !try_send_stream_event(&sender, ChatEvent::OutputFiles(output_files))
+                            .await
+                        {
+                            return Ok(());
+                        }
+                    }
+                    if let Some(usage_report) = self
+                        .build_token_usage_report(&prepared.llm_overrides, token_usage.clone())
+                        .await
+                    {
+                        if !try_send_stream_event(&sender, ChatEvent::TokenUsage(usage_report))
                             .await
                         {
                             return Ok(());
@@ -689,6 +708,15 @@ impl ChatOrchestrator {
                         "stream exhausted iteration budget without visible reply"
                     );
                     let _ = try_send_stream_event(&sender, ChatEvent::Error { detail }).await;
+                    return Ok(());
+                }
+            }
+
+            if let Some(usage_report) = self
+                .build_token_usage_report(&prepared.llm_overrides, token_usage.clone())
+                .await
+            {
+                if !try_send_stream_event(&sender, ChatEvent::TokenUsage(usage_report)).await {
                     return Ok(());
                 }
             }
@@ -947,9 +975,25 @@ Skills available (call load_skill to use):
             tools,
             stream,
             temperature: overrides.temperature.or(self.config.agent.temperature),
-            max_tokens: Some(overrides.max_tokens.unwrap_or(self.config.agent.max_tokens)),
+            max_tokens: overrides.max_tokens.or(self.config.agent.max_tokens),
             top_p: overrides.top_p.or(self.config.agent.top_p),
+            stream_options: stream.then_some(StreamOptions {
+                include_usage: true,
+            }),
         })
+    }
+
+    async fn build_token_usage_report(
+        &self,
+        overrides: &crate::domain::chat::models::LlmOverrides,
+        usage: TokenUsage,
+    ) -> Option<TokenUsageReport> {
+        let model = overrides
+            .model_id
+            .as_deref()
+            .unwrap_or(&self.config.agent.model_id);
+        let context_window = self.llm_client.model_context_window(model).await;
+        TokenUsageReport::from_usage(usage, context_window)
     }
 
     async fn load_public_tools_with_overrides(
@@ -1487,8 +1531,9 @@ Skills available (call load_skill to use):
                     tools: Some(tools.clone()),
                     stream: false,
                     temperature: self.config.agent.temperature,
-                    max_tokens: Some(self.config.agent.max_tokens),
+                    max_tokens: self.config.agent.max_tokens,
                     top_p: self.config.agent.top_p,
+                    stream_options: None,
                 })
                 .await
             {
@@ -2109,6 +2154,17 @@ fn resolve_max_iterations(
     default_max_iterations: usize,
 ) -> usize {
     overrides.max_iterations.unwrap_or(default_max_iterations)
+}
+
+fn add_token_usage(total: &mut TokenUsage, usage: Option<&TokenUsage>) {
+    let Some(usage) = usage else {
+        return;
+    };
+    total.prompt_tokens = total.prompt_tokens.saturating_add(usage.prompt_tokens);
+    total.completion_tokens = total
+        .completion_tokens
+        .saturating_add(usage.completion_tokens);
+    total.total_tokens = total.total_tokens.saturating_add(usage.total_tokens);
 }
 
 fn max_iterations_from_request(
