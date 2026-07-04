@@ -614,9 +614,8 @@ fn collect_candidate_base_urls(
     config: &McpClientConfig,
     overrides: Option<&McpOverrides>,
 ) -> Result<Vec<String>> {
-    let mut urls = config.base_urls.clone();
-
     if let Some(overrides) = overrides {
+        let mut urls = Vec::new();
         urls.extend(overrides.base_urls.clone());
         if let Some(path) = overrides
             .config_path
@@ -626,7 +625,16 @@ fn collect_candidate_base_urls(
         {
             urls.extend(load_mcp_urls_from_path(path)?);
         }
-    } else if !config.config_path.trim().is_empty() {
+
+        if !urls.is_empty() {
+            return Ok(unique_non_empty(urls));
+        }
+
+        return Ok(unique_non_empty(config.base_urls.clone()));
+    }
+
+    let mut urls = config.base_urls.clone();
+    if !config.config_path.trim().is_empty() {
         urls.extend(load_mcp_urls_from_path(config.config_path.trim())?);
     }
 
@@ -934,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_override_urls_without_config_path() {
+    fn request_override_urls_replace_configured_urls() {
         let config = super::McpClientConfig {
             config_path: String::new(),
             base_urls: vec!["http://one.example/mcp".to_string()],
@@ -950,7 +958,28 @@ mod tests {
 
         assert_eq!(
             resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
-            vec!["http://one.example/mcp", "http://two.example/mcp"]
+            vec!["http://two.example/mcp"]
+        );
+    }
+
+    #[test]
+    fn falls_back_to_configured_urls_when_override_has_no_urls() {
+        let config = super::McpClientConfig {
+            config_path: String::new(),
+            base_urls: vec!["http://one.example/mcp".to_string()],
+        };
+        let overrides = McpOverrides {
+            config_path: None,
+            base_urls: Vec::new(),
+            disabled_urls: Vec::new(),
+            lazy_urls: Vec::new(),
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        };
+
+        assert_eq!(
+            resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
+            vec!["http://one.example/mcp"]
         );
     }
 
@@ -977,7 +1006,7 @@ mod tests {
 
         assert_eq!(
             resolve_effective_base_urls(&config, Some(&overrides)).unwrap(),
-            vec!["http://one.example/mcp"]
+            Vec::<String>::new()
         );
     }
 
@@ -1004,11 +1033,7 @@ mod tests {
 
         assert_eq!(
             resolve_preview_base_urls(&config, Some(&overrides)).unwrap(),
-            vec![
-                "http://one.example/mcp",
-                "http://two.example/mcp",
-                "http://three.example/mcp"
-            ]
+            vec!["http://three.example/mcp"]
         );
     }
 
