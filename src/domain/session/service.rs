@@ -368,6 +368,14 @@ impl SessionContext {
             .insert(snapshot.user_id.clone(), snapshot);
     }
 
+    pub fn clear_cached_snapshot(&self, user_id: &str) -> bool {
+        self.prompt_memory_snapshots
+            .lock()
+            .expect("session snapshot lock poisoned")
+            .remove(user_id)
+            .is_some()
+    }
+
     fn teardown(&self) {
         self.team.shutdown_all();
         let _ = fs::remove_dir_all(&self.session_dir);
@@ -456,6 +464,17 @@ impl SessionService {
         if let Some(context) = removed {
             context.teardown();
         }
+    }
+
+    pub fn clear_cached_snapshots(&self, user_id: &str) -> usize {
+        let sessions = {
+            let inner = self.inner.lock().expect("session store lock poisoned");
+            inner.sessions.values().cloned().collect::<Vec<_>>()
+        };
+        sessions
+            .into_iter()
+            .filter(|context| context.clear_cached_snapshot(user_id))
+            .count()
     }
 
     pub fn session_tool_schemas() -> Vec<Value> {

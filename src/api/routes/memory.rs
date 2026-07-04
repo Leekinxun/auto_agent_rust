@@ -2,15 +2,20 @@ use axum::extract::{Path, Query, State};
 use axum::routing::{delete, get};
 use axum::{Json, Router};
 
-use crate::api::dto::memory::{MemoryQuery, MemoryResponse, SessionDeleteResponse};
+use crate::api::dto::memory::{
+    MemoryQuery, MemoryResponse, SessionDeleteResponse, UserMemoryResetResponse,
+};
 use crate::api::errors::ApiResult;
 use crate::app_state::SharedState;
 
 pub fn router() -> Router<SharedState> {
-    Router::new().route("/memory", get(get_memory)).route(
-        "/memory/session/{session_id}",
-        delete(delete_session_memory),
-    )
+    Router::new()
+        .route("/memory", get(get_memory))
+        .route("/memory/user/{user_id}", delete(reset_user_memory))
+        .route(
+            "/memory/session/{session_id}",
+            delete(delete_session_memory),
+        )
 }
 
 async fn get_memory(
@@ -47,4 +52,25 @@ async fn delete_session_memory(
         success: true,
         session_id,
     })
+}
+
+async fn reset_user_memory(
+    State(state): State<SharedState>,
+    Path(user_id): Path<String>,
+) -> ApiResult<Json<UserMemoryResetResponse>> {
+    let reset = state.memory_service.reset_user_memory(&user_id)?;
+    let cached_session_snapshots_cleared = state.session_service.clear_cached_snapshots(&user_id);
+    Ok(Json(UserMemoryResetResponse {
+        success: true,
+        user_id: reset.user_id,
+        user_md_cleared: reset.user_md_cleared,
+        memory_md_cleared: reset.memory_md_cleared,
+        private_skills_cleared: reset.private_skills_cleared,
+        private_skill_count: reset.private_skill_count,
+        cached_session_snapshots_cleared,
+        mcp_state: "stateless_request_scoped".to_string(),
+        user_md_path: reset.paths.user_md.display().to_string(),
+        memory_md_path: reset.paths.memory_md.display().to_string(),
+        private_skills_path: reset.paths.skills_dir.display().to_string(),
+    }))
 }

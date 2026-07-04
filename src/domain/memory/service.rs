@@ -6,7 +6,9 @@ use dashmap::DashMap;
 use serde_json::json;
 use tokio::sync::Mutex;
 
-use crate::domain::memory::models::{UserMemorySnapshot, UserWorkspacePaths};
+use crate::domain::memory::models::{
+    UserMemoryResetResult, UserMemorySnapshot, UserWorkspacePaths,
+};
 use crate::infra::fs::user_memory_store::FileMemoryStore;
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{ChatCompletionRequest, ChatMessage};
@@ -32,6 +34,10 @@ impl UserMemoryService {
 
     pub fn load_snapshot(&self, user_id: &str) -> Result<UserMemorySnapshot> {
         self.store.load_snapshot(user_id)
+    }
+
+    pub fn reset_user_memory(&self, user_id: &str) -> Result<UserMemoryResetResult> {
+        self.store.reset_workspace(user_id)
     }
 
     pub fn build_user_memory_system(

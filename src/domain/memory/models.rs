@@ -16,3 +16,13 @@ pub struct UserMemorySnapshot {
     pub user_md: String,
     pub memory_md: String,
 }
+
+#[derive(Debug, Clone)]
+pub struct UserMemoryResetResult {
+    pub user_id: String,
+    pub paths: UserWorkspacePaths,
+    pub user_md_cleared: bool,
+    pub memory_md_cleared: bool,
+    pub private_skills_cleared: bool,
+    pub private_skill_count: usize,
+}

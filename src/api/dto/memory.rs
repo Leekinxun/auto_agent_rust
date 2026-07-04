@@ -34,3 +34,18 @@ pub struct SessionDeleteResponse {
     pub success: bool,
     pub session_id: String,
 }
+
+#[derive(Debug, Serialize)]
+pub struct UserMemoryResetResponse {
+    pub success: bool,
+    pub user_id: String,
+    pub user_md_cleared: bool,
+    pub memory_md_cleared: bool,
+    pub private_skills_cleared: bool,
+    pub private_skill_count: usize,
+    pub cached_session_snapshots_cleared: usize,
+    pub mcp_state: String,
+    pub user_md_path: String,
+    pub memory_md_path: String,
+    pub private_skills_path: String,
+}

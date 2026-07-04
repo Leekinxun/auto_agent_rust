@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use crate::config::model::FileMemoryConfig;
-use crate::domain::memory::models::{UserMemorySnapshot, UserWorkspacePaths};
+use crate::domain::memory::models::{
+    UserMemoryResetResult, UserMemorySnapshot, UserWorkspacePaths,
+};
 use crate::support::sanitize::safe_user_dir_name;
 
 const USER_FILENAME: &str = "USER.md";
@@ -59,6 +61,33 @@ impl FileMemoryStore {
         })
     }
 
+    pub fn reset_workspace(&self, user_id: &str) -> Result<UserMemoryResetResult> {
+        let paths = self.ensure_workspace(user_id)?;
+        let private_skill_count = count_skill_files(&paths.skills_dir)?;
+
+        std::fs::write(&paths.user_md, "")
+            .with_context(|| format!("failed to clear {}", paths.user_md.display()))?;
+        std::fs::write(&paths.memory_md, "")
+            .with_context(|| format!("failed to clear {}", paths.memory_md.display()))?;
+
+        let private_skills_cleared = paths.skills_dir.exists();
+        if private_skills_cleared {
+            std::fs::remove_dir_all(&paths.skills_dir)
+                .with_context(|| format!("failed to delete {}", paths.skills_dir.display()))?;
+        }
+        std::fs::create_dir_all(&paths.skills_dir)
+            .with_context(|| format!("failed to recreate {}", paths.skills_dir.display()))?;
+
+        Ok(UserMemoryResetResult {
+            user_id: user_id.to_string(),
+            paths,
+            user_md_cleared: true,
+            memory_md_cleared: true,
+            private_skills_cleared,
+            private_skill_count,
+        })
+    }
+
     pub fn read_user_md(&self, user_id: &str) -> Result<String> {
         let paths = self.ensure_workspace(user_id)?;
         read_trimmed(&paths.user_md)
@@ -95,4 +124,29 @@ fn read_trimmed(path: &Path) -> Result<String> {
         .with_context(|| format!("failed to read {}", path.display()))?
         .trim()
         .to_string())
+}
+
+fn count_skill_files(path: &Path) -> Result<usize> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    fn visit(path: &Path, count: &mut usize) -> Result<()> {
+        for entry in
+            std::fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))?
+        {
+            let entry = entry?;
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                visit(&entry_path, count)?;
+            } else if entry_path.file_name().and_then(|name| name.to_str()) == Some("SKILL.md") {
+                *count += 1;
+            }
+        }
+        Ok(())
+    }
+
+    let mut count = 0;
+    visit(path, &mut count)?;
+    Ok(count)
 }
