@@ -2,6 +2,28 @@
 
 这是一个从原项目中拆出来的纯 `Rust + React + TypeScript` 版本，不再包含 Python 后端。
 
+## Changelog
+
+### [Unreleased]
+
+#### Added
+
+- 新增 session steering 能力：`POST /agent/session/{session_id}/steering` 可在流式运行中注入纠偏消息，orchestrator 会中断剩余工具、重新评估并继续输出。
+- 新增 HITL 人在回路审批：支持按工具名 / 工具前缀配置审批策略，流式事件会发出 `approval_required` / `approval_resolved`，审批接口支持通过、拒绝和修改参数后通过。
+- 新增模型上下文窗口发现：未显式配置 `max_tokens` 时不再强制下发输出上限；token 用量会结合 vLLM `/models` 返回的 `max_model_len` 计算已使用百分比。
+- 新增请求级运行时覆盖，可由 CoAssist 下发用户隔离后的 MCP、Skills、内置工具、HITL 与模型参数策略。
+
+#### Changed
+
+- `.env.example` 直接列出内置文件工具开关，`read_file` / `write_file` / `edit_file` 默认关闭，避免模型优先依赖本地文件工具而忽略 MCP。
+- `AGENT_TEMPERATURE` 纳入配置加载链路，便于部署环境统一控制采样温度。
+- MCP 与 Skills 会按请求中的用户授权实时过滤，并支持用户私有记忆、私有 skills 和私有 MCP 状态隔离。
+- 大工具结果会按预算落盘并只把预览和路径放入上下文，降低长上下文污染。
+
+#### Fixed
+
+- 修复旧运行中的 steering 消息泄漏到下一轮会话的问题。
+
 ## 目录
 
 - `src/`: Rust 后端
@@ -224,10 +246,14 @@ Harness 相关运行记录保存在 `.omx/` 下：
   - 前端会将工具调用、工具结果、上传文件、skill 更新、完成状态、错误等过程事件做可读化展示，而不再仅显示原始 JSON
   - prompt memory snapshot session cache
   - 后台结果注入、inbox 注入、todo reminder
+  - session steering 实时纠偏
   - `microcompact` / `auto_compact` / `compress` 上下文压缩链路
   - `load_skill` 工具调用
   - 记忆模式下的 `USER.md` / `MEMORY.md` 注入与维护
   - 记忆模式下使用公用 skill 时创建私有副本
+  - vLLM `/models` 上下文窗口发现与 token 使用百分比统计
+  - 可配置 HITL 人在回路审批
+  - 可配置内置文件工具开关
 - 已补齐的兼容与测试：
   - `agent_id` 兼容：`POST /agent/memory/run`、`POST /agent/memory/stream`、`GET /agent/memory` 现在都接受 `agent_id`，并在缺少 `user_id` 时回退使用它
   - MCP 降级测试：MCP 服务不可用时不会阻塞普通 chat
@@ -256,9 +282,15 @@ Harness 相关运行记录保存在 `.omx/` 下：
   - `AGENT_MODEL_ID` / `MODEL_ID`
   - `AGENT_BASE_URL` / `ANTHROPIC_BASE_URL`
   - `AGENT_API_KEY`
-  - `AGENT_MAX_TOKENS`
+  - `AGENT_MAX_TOKENS`（可选；留空时不强制下发，由模型服务上下文能力决定）
   - `AGENT_TEMPERATURE`
   - `AGENT_TOP_P`
+  - `BUILTIN_TOOLS_ENABLED`
+  - `BUILTIN_TOOL_READ_FILE_ENABLED`
+  - `BUILTIN_TOOL_WRITE_FILE_ENABLED`
+  - `BUILTIN_TOOL_EDIT_FILE_ENABLED`
+  - `HITL_ENABLED`
+  - `HITL_TIMEOUT_SECONDS`
   - `MCP_BASE_URL`
   - `MCP_TIMEOUT`
   - `MCP_CONNECT_TIMEOUT`
