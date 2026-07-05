@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub logging: LoggingConfig,
     pub memory: MemoryConfig,
     pub skills: SkillsConfig,
+    pub builtin_tools: BuiltinToolsConfig,
     pub hitl: HitlConfig,
 }
 
@@ -24,6 +25,7 @@ impl Default for AppConfig {
             logging: LoggingConfig::default(),
             memory: MemoryConfig::default(),
             skills: SkillsConfig::default(),
+            builtin_tools: BuiltinToolsConfig::default(),
             hitl: HitlConfig::default(),
         }
     }
@@ -70,6 +72,24 @@ impl Default for AgentConfig {
             tool_result_size_chars: 100_000,
             tool_turn_budget_chars: 200_000,
             tool_result_preview_chars: 1_500,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BuiltinToolsConfig {
+    pub enabled: bool,
+    pub allowed_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
+}
+
+impl Default for BuiltinToolsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
         }
     }
 }

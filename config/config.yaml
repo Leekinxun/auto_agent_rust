@@ -19,6 +19,12 @@ agent:
   tool_turn_budget_chars: 200000      # 单轮多个工具结果总字符预算，超出后优先落盘最大结果
   tool_result_preview_chars: 1500     # 大结果落盘后保留在上下文里的预览长度
 
+# ---------- auto_cc 内置文件工具 ----------
+builtin_tools:
+  enabled: true                       # false 时 read_file/write_file/edit_file 都不提供给模型
+  allowed_tools: []                   # 空数组表示允许全部内置文件工具
+  denied_tools: []                    # 可填写 read_file/write_file/edit_file 中需要禁用的工具
+
 # ---------- 人在回路（HITL） ----------
 hitl:
   enabled: false                  # 开启后，匹配规则的工具调用会暂停等待人工确认

@@ -15,8 +15,9 @@ use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse, SteeringResponse
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
-    AgentPromptOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry, HitlOverrides,
-    LlmOverrides, McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
+    AgentPromptOverrides, BuiltinToolOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry,
+    HitlOverrides, LlmOverrides, McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
+    is_builtin_file_tool, normalize_builtin_tool_list,
 };
 use crate::domain::hitl::models::HitlDecisionResolution;
 use crate::domain::hitl::policy::HitlDefaultAction;
@@ -405,6 +406,9 @@ async fn parse_chat_multipart(
     let mut mcp_denied_tools_json: Option<String> = None;
     let mut skill_allowed_names_json: Option<String> = None;
     let mut skill_denied_names_json: Option<String> = None;
+    let mut builtin_tools_enabled: Option<bool> = None;
+    let mut builtin_allowed_tools_json: Option<String> = None;
+    let mut builtin_denied_tools_json: Option<String> = None;
     let mut hitl_enabled: Option<bool> = None;
     let mut hitl_default_action: Option<HitlDefaultAction> = None;
     let mut hitl_timeout_seconds: Option<u64> = None;
@@ -449,6 +453,11 @@ async fn parse_chat_multipart(
             "mcp_denied_tools" => mcp_denied_tools_json = non_empty(value),
             "skill_allowed_names" => skill_allowed_names_json = non_empty(value),
             "skill_denied_names" => skill_denied_names_json = non_empty(value),
+            "builtin_tools_enabled" => {
+                builtin_tools_enabled = Some(parse_bool_field(&value, "builtin_tools_enabled")?)
+            }
+            "builtin_allowed_tools" => builtin_allowed_tools_json = non_empty(value),
+            "builtin_denied_tools" => builtin_denied_tools_json = non_empty(value),
             "hitl_enabled" => hitl_enabled = Some(parse_bool_field(&value, "hitl_enabled")?),
             "hitl_default_action" => hitl_default_action = Some(parse_hitl_default_action(&value)?),
             "hitl_timeout_seconds" => {
@@ -546,6 +555,21 @@ async fn parse_chat_multipart(
         timeout_seconds: hitl_timeout_raw,
         rules: hitl_rules,
     };
+    let builtin_allowed_tools = if let Some(raw) = builtin_allowed_tools_json.as_deref() {
+        parse_builtin_tool_list(raw, "builtin_allowed_tools")?
+    } else {
+        normalize_builtin_tool_list(state.config.builtin_tools.allowed_tools.clone())
+    };
+    let builtin_denied_tools = if let Some(raw) = builtin_denied_tools_json.as_deref() {
+        parse_builtin_tool_list(raw, "builtin_denied_tools")?
+    } else {
+        normalize_builtin_tool_list(state.config.builtin_tools.denied_tools.clone())
+    };
+    let builtin_tool_overrides = BuiltinToolOverrides {
+        enabled: builtin_tools_enabled.unwrap_or(state.config.builtin_tools.enabled),
+        allowed_tools: builtin_allowed_tools,
+        denied_tools: builtin_denied_tools,
+    };
 
     Ok(ChatRequest {
         message,
@@ -577,6 +601,7 @@ async fn parse_chat_multipart(
             allowed_tools: mcp_allowed_tools,
             denied_tools: mcp_denied_tools,
         },
+        builtin_tool_overrides,
         skill_permissions: SkillPermissions {
             allowed_skills: skill_allowed_names,
             denied_skills: skill_denied_names,
@@ -711,6 +736,22 @@ fn parse_string_list(raw: Option<&str>, label: &str) -> ApiResult<Vec<String>> {
         .filter(|item| !item.is_empty())
         .filter(|item| seen.insert(item.clone()))
         .collect())
+}
+
+fn parse_builtin_tool_list(raw: &str, label: &str) -> ApiResult<Vec<String>> {
+    let parsed = parse_string_list(Some(raw), label)?;
+    let invalid = parsed
+        .iter()
+        .filter(|item| !is_builtin_file_tool(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !invalid.is_empty() {
+        return Err(ApiError::bad_request(format!(
+            "{label} 包含不支持的内置工具: {}",
+            invalid.join(", ")
+        )));
+    }
+    Ok(normalize_builtin_tool_list(parsed))
 }
 
 fn parse_mcp_base_urls(raw: Option<&str>) -> ApiResult<Vec<String>> {

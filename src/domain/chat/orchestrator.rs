@@ -14,9 +14,10 @@ use crate::domain::chat::compaction::{
     auto_compact, estimate_tokens, microcompact, public_compaction_tool_schemas,
 };
 use crate::domain::chat::models::{
-    AgentPromptOverrides, AgentPromptSettingsPreview, ChatEvent, ChatMode, ChatRequest, ChatResult,
-    HistoryEntry, HitlOverrides, McpServerPreviewDto, McpSettingsPreview, OutputFile,
-    SkillPermissions, SkillUsage, SystemPromptPreview, TokenUsageReport,
+    AgentPromptOverrides, AgentPromptSettingsPreview, BuiltinToolOverrides, ChatEvent, ChatMode,
+    ChatRequest, ChatResult, HistoryEntry, HitlOverrides, McpServerPreviewDto, McpSettingsPreview,
+    OutputFile, SkillPermissions, SkillUsage, SystemPromptPreview, TokenUsageReport,
+    is_builtin_file_tool,
 };
 use crate::domain::chat::tool_context::{
     ToolContextBudget, enforce_tool_turn_budget, prepare_tool_result_for_context,
@@ -143,6 +144,7 @@ impl ChatOrchestrator {
                     .load_public_tools_with_overrides(
                         prepared.session.is_some(),
                         Some(&prepared.mcp_overrides),
+                        &prepared.builtin_tool_overrides,
                         &mcp_tool_selection,
                     )
                     .await;
@@ -191,6 +193,7 @@ impl ChatOrchestrator {
                             prepared.user_id.as_deref(),
                             matches!(mode, ChatMode::Memory),
                             &prepared.mcp_overrides,
+                            &prepared.builtin_tool_overrides,
                             &mut mcp_tool_selection,
                             &mut skill_usages,
                             &prepared.skill_permissions,
@@ -401,6 +404,7 @@ impl ChatOrchestrator {
                     .load_public_tools_with_overrides(
                         prepared.session.is_some(),
                         Some(&prepared.mcp_overrides),
+                        &prepared.builtin_tool_overrides,
                         &mcp_tool_selection,
                     )
                     .await;
@@ -617,6 +621,7 @@ impl ChatOrchestrator {
                             prepared.user_id.as_deref(),
                             matches!(mode, ChatMode::Memory),
                             &prepared.mcp_overrides,
+                            &prepared.builtin_tool_overrides,
                             &mut mcp_tool_selection,
                             &mut skill_usages,
                             &prepared.skill_permissions,
@@ -878,6 +883,7 @@ impl ChatOrchestrator {
             llm_overrides: request.llm_overrides,
             prompt_overrides: request.prompt_overrides,
             mcp_overrides: request.mcp_overrides,
+            builtin_tool_overrides: request.builtin_tool_overrides,
             skill_permissions: request.skill_permissions,
             hitl_overrides: request.hitl_overrides,
             trace_request,
@@ -1000,9 +1006,10 @@ Skills available (call load_skill to use):
         &self,
         include_session_tools: bool,
         mcp_overrides: Option<&crate::domain::chat::models::McpOverrides>,
+        builtin_tool_overrides: &BuiltinToolOverrides,
         mcp_tool_selection: &McpToolSelection,
     ) -> Vec<serde_json::Value> {
-        let mut tools = static_public_tool_schemas(include_session_tools);
+        let mut tools = static_public_tool_schemas(include_session_tools, builtin_tool_overrides);
         match self
             .mcp_client
             .list_tool_schemas(mcp_overrides, Some(mcp_tool_selection))
@@ -1178,6 +1185,7 @@ Skills available (call load_skill to use):
         user_id: Option<&str>,
         memory_mode: bool,
         mcp_overrides: &crate::domain::chat::models::McpOverrides,
+        builtin_tool_overrides: &BuiltinToolOverrides,
         mcp_tool_selection: &mut McpToolSelection,
         skill_usages: &mut Vec<SkillUsage>,
         skill_permissions: &SkillPermissions,
@@ -1189,6 +1197,12 @@ Skills available (call load_skill to use):
             serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
                 .unwrap_or_else(|_| json!({}));
         let tool_name = tool_call.function.name.as_str();
+
+        if is_builtin_file_tool(tool_name) && !builtin_tool_overrides.allows(tool_name) {
+            return format!(
+                "Built-in tool {tool_name} is disabled by the current runtime configuration. Use an authorized MCP tool instead."
+            );
+        }
 
         if let Some(resolution) = self
             .apply_hitl_gate(
@@ -1234,6 +1248,7 @@ Skills available (call load_skill to use):
                     &self.task_service,
                     &self.llm_client,
                     &self.config.agent.model_id,
+                    builtin_tool_overrides,
                 )
                 .await
         {
@@ -1272,7 +1287,9 @@ Skills available (call load_skill to use):
                     .and_then(|value| value.as_str())
                     .unwrap_or("Explore");
                 match prompt {
-                    Ok(prompt) => Ok(self.run_subagent(prompt, agent_type).await),
+                    Ok(prompt) => Ok(self
+                        .run_subagent(prompt, agent_type, builtin_tool_overrides)
+                        .await),
                     Err(error) => Err(error),
                 }
             }
@@ -1469,7 +1486,12 @@ Skills available (call load_skill to use):
         ))
     }
 
-    async fn run_subagent(&self, prompt: &str, agent_type: &str) -> String {
+    async fn run_subagent(
+        &self,
+        prompt: &str,
+        agent_type: &str,
+        builtin_tool_overrides: &BuiltinToolOverrides,
+    ) -> String {
         let mut messages = build_subagent_initial_messages(
             self.harness.render_subagent_system(agent_type),
             prompt,
@@ -1520,15 +1542,21 @@ Skills available (call load_skill to use):
                 }
             }));
         }
+        tools = filter_builtin_tool_schemas(tools, builtin_tool_overrides);
         self.harness.apply_tool_descriptions(&mut tools);
 
         for _ in 0..self.config.agent.subagent_max_iterations {
+            let request_tools = if tools.is_empty() {
+                None
+            } else {
+                Some(tools.clone())
+            };
             let response = match self
                 .llm_client
                 .chat(&ChatCompletionRequest {
                     model: self.config.agent.model_id.clone(),
                     messages: messages.clone(),
-                    tools: Some(tools.clone()),
+                    tools: request_tools,
                     stream: false,
                     temperature: self.config.agent.temperature,
                     max_tokens: self.config.agent.max_tokens,
@@ -1560,12 +1588,18 @@ Skills available (call load_skill to use):
                 let arguments =
                     serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
                         .unwrap_or_else(|_| json!({}));
-                let output = dispatch_public_file_tool(
-                    &self.repo_root,
-                    tool_call.function.name.as_str(),
-                    &arguments,
-                )
-                .unwrap_or_else(|| format!("Unknown tool: {}", tool_call.function.name));
+                let tool_name = tool_call.function.name.clone();
+                if is_builtin_file_tool(&tool_name) && !builtin_tool_overrides.allows(&tool_name) {
+                    messages.push(ChatMessage::tool(
+                        tool_call.id,
+                        format!(
+                            "Built-in tool {tool_name} is disabled by the current runtime configuration."
+                        ),
+                    ));
+                    continue;
+                }
+                let output = dispatch_public_file_tool(&self.repo_root, &tool_name, &arguments)
+                    .unwrap_or_else(|| format!("Unknown tool: {tool_name}"));
                 messages.push(ChatMessage::tool(
                     tool_call.id,
                     truncate_for_preview(&output, 50_000),
@@ -1943,8 +1977,11 @@ fn hitl_status_label(resolution: &HitlDecisionResolution) -> &'static str {
     }
 }
 
-fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Value> {
-    let mut tools = public_file_tool_schemas();
+fn static_public_tool_schemas(
+    include_session_tools: bool,
+    builtin_tool_overrides: &BuiltinToolOverrides,
+) -> Vec<serde_json::Value> {
+    let mut tools = filter_builtin_tool_schemas(public_file_tool_schemas(), builtin_tool_overrides);
     tools.extend(public_compaction_tool_schemas());
     tools.extend(public_task_tool_schemas());
     tools.extend(public_worktree_tool_schemas());
@@ -1981,6 +2018,25 @@ fn static_public_tool_schemas(include_session_tools: bool) -> Vec<serde_json::Va
         }
     }));
     tools
+}
+
+fn filter_builtin_tool_schemas(
+    tools: Vec<serde_json::Value>,
+    builtin_tool_overrides: &BuiltinToolOverrides,
+) -> Vec<serde_json::Value> {
+    tools
+        .into_iter()
+        .filter(|tool| {
+            let Some(name) = schema_function_name(tool) else {
+                return true;
+            };
+            !is_builtin_file_tool(name) || builtin_tool_overrides.allows(name)
+        })
+        .collect()
+}
+
+fn schema_function_name(tool: &serde_json::Value) -> Option<&str> {
+    tool.get("function")?.get("name")?.as_str()
 }
 
 fn lazy_mcp_control_tool_schemas() -> Vec<serde_json::Value> {
@@ -2032,6 +2088,7 @@ struct PreparedRequest {
     llm_overrides: crate::domain::chat::models::LlmOverrides,
     prompt_overrides: AgentPromptOverrides,
     mcp_overrides: crate::domain::chat::models::McpOverrides,
+    builtin_tool_overrides: BuiltinToolOverrides,
     skill_permissions: SkillPermissions,
     hitl_overrides: HitlOverrides,
     trace_request: HarnessTraceRequest,
@@ -2509,7 +2566,7 @@ mod tests {
 
     #[test]
     fn static_public_tool_surface_matches_reference_set_except_dynamic_mcp() {
-        let actual = static_public_tool_schemas(true)
+        let actual = static_public_tool_schemas(true, &Default::default())
             .into_iter()
             .filter_map(|tool| {
                 tool.get("function")

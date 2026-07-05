@@ -9,6 +9,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::oneshot;
 use tokio::time::{Duration, timeout};
 
+use crate::domain::chat::models::BuiltinToolOverrides;
 use crate::domain::hitl::models::{HitlDecisionRequest, HitlDecisionResolution};
 
 use crate::domain::memory::models::UserMemorySnapshot;
@@ -270,6 +271,7 @@ impl SessionContext {
         task_service: &TaskService,
         llm_client: &LlmClient,
         model_id: &str,
+        builtin_tool_overrides: &BuiltinToolOverrides,
     ) -> Result<String> {
         self.team
             .spawn(
@@ -279,6 +281,7 @@ impl SessionContext {
                 task_service.clone(),
                 llm_client.clone(),
                 model_id.to_string(),
+                builtin_tool_overrides.clone(),
             )
             .await
     }
@@ -649,6 +652,7 @@ impl SessionService {
         task_service: &TaskService,
         llm_client: &LlmClient,
         model_id: &str,
+        builtin_tool_overrides: &BuiltinToolOverrides,
     ) -> Option<String> {
         match name {
             "TodoWrite" => Some(format_result(
@@ -668,7 +672,15 @@ impl SessionService {
                     required_string(arguments, "prompt", "spawn_teammate"),
                 ) {
                     (Ok(name), Ok(role), Ok(prompt)) => context
-                        .spawn_teammate(name, role, prompt, task_service, llm_client, model_id)
+                        .spawn_teammate(
+                            name,
+                            role,
+                            prompt,
+                            task_service,
+                            llm_client,
+                            model_id,
+                            builtin_tool_overrides,
+                        )
                         .await
                         .unwrap_or_else(|error| format!("Error: {error}")),
                     (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {

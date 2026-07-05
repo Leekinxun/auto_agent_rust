@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::model::AppConfig;
+use crate::domain::chat::models::{is_builtin_file_tool, normalize_builtin_tool_list};
 use crate::domain::harness::{
     MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH,
     SKILL_LEARNING_SYSTEM_PATH, SKILL_LEARNING_USER_TEMPLATE_PATH,
@@ -109,6 +110,26 @@ where
         config.agent.tool_result_preview_chars =
             parse_positive_usize("AGENT_TOOL_RESULT_PREVIEW_CHARS", &value)?;
     }
+    if let Some(value) = first_non_empty_env(
+        get_env,
+        &["BUILTIN_TOOLS_ENABLED", "BUILTIN_FILE_TOOLS_ENABLED"],
+    ) {
+        config.builtin_tools.enabled = parse_bool_env("BUILTIN_TOOLS_ENABLED", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(
+        get_env,
+        &["BUILTIN_ALLOWED_TOOLS", "BUILTIN_FILE_ALLOWED_TOOLS"],
+    ) {
+        config.builtin_tools.allowed_tools =
+            parse_builtin_tool_csv("BUILTIN_ALLOWED_TOOLS", &value)?;
+    }
+    if let Some(value) = first_non_empty_env(
+        get_env,
+        &["BUILTIN_DENIED_TOOLS", "BUILTIN_FILE_DENIED_TOOLS"],
+    ) {
+        config.builtin_tools.denied_tools = parse_builtin_tool_csv("BUILTIN_DENIED_TOOLS", &value)?;
+    }
+    apply_builtin_tool_flag_overrides(config, get_env)?;
     if let Some(value) = first_non_empty_env(get_env, &["HITL_ENABLED"]) {
         config.hitl.enabled = parse_bool_env("HITL_ENABLED", &value)?;
     }
@@ -197,6 +218,100 @@ fn split_csv(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn parse_builtin_tool_csv(key: &str, raw: &str) -> Result<Vec<String>> {
+    let items = split_csv(raw);
+    let invalid = items
+        .iter()
+        .filter(|item| !is_builtin_file_tool(item))
+        .cloned()
+        .collect::<Vec<_>>();
+    ensure!(
+        invalid.is_empty(),
+        "{key} contains unsupported built-in tool names: {}",
+        invalid.join(", ")
+    );
+    let normalized = normalize_builtin_tool_list(items.clone());
+    Ok(normalized)
+}
+
+fn apply_builtin_tool_flag_overrides<F>(config: &mut AppConfig, get_env: &F) -> Result<()>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    for (tool_name, env_keys) in [
+        (
+            "read_file",
+            &[
+                "BUILTIN_TOOL_READ_FILE_ENABLED",
+                "BUILTIN_READ_FILE_ENABLED",
+            ][..],
+        ),
+        (
+            "write_file",
+            &[
+                "BUILTIN_TOOL_WRITE_FILE_ENABLED",
+                "BUILTIN_WRITE_FILE_ENABLED",
+            ][..],
+        ),
+        (
+            "edit_file",
+            &[
+                "BUILTIN_TOOL_EDIT_FILE_ENABLED",
+                "BUILTIN_EDIT_FILE_ENABLED",
+            ][..],
+        ),
+    ] {
+        let Some(raw) = first_non_empty_env(get_env, env_keys) else {
+            continue;
+        };
+        let enabled = parse_bool_env(env_keys[0], &raw)?;
+        set_builtin_tool_flag(config, tool_name, enabled);
+    }
+    config.builtin_tools.allowed_tools =
+        normalize_builtin_tool_list(config.builtin_tools.allowed_tools.clone());
+    config.builtin_tools.denied_tools =
+        normalize_builtin_tool_list(config.builtin_tools.denied_tools.clone());
+    Ok(())
+}
+
+fn set_builtin_tool_flag(config: &mut AppConfig, tool_name: &str, enabled: bool) {
+    if enabled {
+        config
+            .builtin_tools
+            .denied_tools
+            .retain(|item| item.trim() != tool_name);
+        if !config.builtin_tools.allowed_tools.is_empty()
+            && !config
+                .builtin_tools
+                .allowed_tools
+                .iter()
+                .any(|item| item.trim() == tool_name)
+        {
+            config
+                .builtin_tools
+                .allowed_tools
+                .push(tool_name.to_string());
+        }
+        return;
+    }
+
+    config
+        .builtin_tools
+        .allowed_tools
+        .retain(|item| item.trim() != tool_name);
+    if !config
+        .builtin_tools
+        .denied_tools
+        .iter()
+        .any(|item| item.trim() == tool_name)
+    {
+        config
+            .builtin_tools
+            .denied_tools
+            .push(tool_name.to_string());
+    }
+}
+
 fn first_non_empty_env<F>(get_env: &F, keys: &[&str]) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -280,6 +395,9 @@ mod tests {
             ("AGENT_TOOL_RESULT_SIZE_CHARS", "110000"),
             ("AGENT_TOOL_TURN_BUDGET_CHARS", "210000"),
             ("AGENT_TOOL_RESULT_PREVIEW_CHARS", "1600"),
+            ("BUILTIN_TOOLS_ENABLED", "false"),
+            ("BUILTIN_ALLOWED_TOOLS", "read_file, edit_file"),
+            ("BUILTIN_DENIED_TOOLS", "write_file"),
             ("HITL_ENABLED", "true"),
             ("HITL_TIMEOUT_SECONDS", "120"),
             ("SERVER_HOST", "127.0.0.1"),
@@ -308,6 +426,12 @@ mod tests {
         assert_eq!(config.agent.tool_result_size_chars, 110_000);
         assert_eq!(config.agent.tool_turn_budget_chars, 210_000);
         assert_eq!(config.agent.tool_result_preview_chars, 1_600);
+        assert!(!config.builtin_tools.enabled);
+        assert_eq!(
+            config.builtin_tools.allowed_tools,
+            vec!["read_file", "edit_file"]
+        );
+        assert_eq!(config.builtin_tools.denied_tools, vec!["write_file"]);
         assert!(config.hitl.enabled);
         assert_eq!(config.hitl.timeout_seconds, 120);
         assert_eq!(config.server.host, "127.0.0.1");
@@ -342,6 +466,25 @@ mod tests {
         assert_eq!(config.agent.model_id, "legacy-model");
         assert_eq!(config.agent.base_url, "http://legacy.example/v1");
         assert_eq!(config.mcp.base_url, "http://legacy.example/mcp");
+    }
+
+    #[test]
+    fn builtin_tool_name_flags_override_allowed_and_denied_lists() {
+        let mut config = AppConfig::default();
+        let env = env_map(&[
+            ("BUILTIN_ALLOWED_TOOLS", "read_file, write_file"),
+            ("BUILTIN_DENIED_TOOLS", "edit_file"),
+            ("BUILTIN_TOOL_WRITE_FILE_ENABLED", "false"),
+            ("BUILTIN_TOOL_EDIT_FILE_ENABLED", "true"),
+        ]);
+
+        apply_env_overrides_with(&mut config, &|key| env.get(key).cloned()).unwrap();
+
+        assert_eq!(
+            config.builtin_tools.allowed_tools,
+            vec!["read_file", "edit_file"]
+        );
+        assert_eq!(config.builtin_tools.denied_tools, vec!["write_file"]);
     }
 
     #[test]

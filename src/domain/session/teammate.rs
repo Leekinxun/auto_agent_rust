@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
+use crate::domain::chat::models::{BuiltinToolOverrides, is_builtin_file_tool};
 use crate::domain::tasks::service::TaskService;
 use crate::infra::fs::tool_ops::dispatch_public_file_tool;
 use crate::infra::llm::client::LlmClient;
@@ -121,6 +122,7 @@ impl TeammateManager {
         task_service: TaskService,
         llm_client: LlmClient,
         model_id: String,
+        builtin_tool_overrides: BuiltinToolOverrides,
     ) -> Result<String> {
         let name = name.trim();
         let role = role.trim();
@@ -176,6 +178,7 @@ impl TeammateManager {
                     task_service,
                     llm_client,
                     model_id,
+                    builtin_tool_overrides,
                 )
                 .await;
         });
@@ -277,6 +280,7 @@ impl TeammateManager {
         task_service: TaskService,
         llm_client: LlmClient,
         model_id: String,
+        builtin_tool_overrides: BuiltinToolOverrides,
     ) {
         let team_name = self.team_name();
         let system_prompt = format!(
@@ -310,7 +314,7 @@ impl TeammateManager {
                     .chat(&ChatCompletionRequest {
                         model: model_id.clone(),
                         messages: prepend_system_message(&system_prompt, &messages),
-                        tools: Some(teammate_tool_schemas()),
+                        tools: Some(teammate_tool_schemas(&builtin_tool_overrides)),
                         stream: false,
                         temperature: None,
                         max_tokens: Some(8_000),
@@ -356,12 +360,21 @@ impl TeammateManager {
                                 )
                             })
                             .unwrap_or_else(|error| format!("Error: {error}")),
-                        "read_file" | "write_file" | "edit_file" => dispatch_public_file_tool(
-                            &self.repo_root,
-                            tool_call.function.name.as_str(),
-                            &arguments,
-                        )
-                        .unwrap_or_else(|| format!("Unknown tool: {}", tool_call.function.name)),
+                        "read_file" | "write_file" | "edit_file" => {
+                            let tool_name = tool_call.function.name.as_str();
+                            if is_builtin_file_tool(tool_name)
+                                && !builtin_tool_overrides.allows(tool_name)
+                            {
+                                format!(
+                                    "Built-in tool {tool_name} is disabled by the current runtime configuration."
+                                )
+                            } else {
+                                dispatch_public_file_tool(&self.repo_root, tool_name, &arguments)
+                                    .unwrap_or_else(|| {
+                                        format!("Unknown tool: {}", tool_call.function.name)
+                                    })
+                            }
+                        }
                         other => format!("Unknown tool: {other}"),
                     };
                     messages.push(ChatMessage::tool(
@@ -482,8 +495,8 @@ fn prepend_system_message(system_prompt: &str, messages: &[ChatMessage]) -> Vec<
     request_messages
 }
 
-fn teammate_tool_schemas() -> Vec<Value> {
-    vec![
+fn teammate_tool_schemas(builtin_tool_overrides: &BuiltinToolOverrides) -> Vec<Value> {
+    let mut tools = vec![
         json!({
             "type": "function",
             "function": {
@@ -562,7 +575,18 @@ fn teammate_tool_schemas() -> Vec<Value> {
                 }
             }
         }),
-    ]
+    ];
+    tools.retain(|tool| {
+        let Some(name) = tool
+            .get("function")
+            .and_then(|value| value.get("name"))
+            .and_then(Value::as_str)
+        else {
+            return true;
+        };
+        !is_builtin_file_tool(name) || builtin_tool_overrides.allows(name)
+    });
+    tools
 }
 
 fn parse_string_arg<'a>(arguments: &'a Value, key: &str, tool_name: &str) -> Result<&'a str> {
@@ -604,6 +628,7 @@ fn truncate(text: &str, limit: usize) -> String {
 mod tests {
     use super::TeammateManager;
     use crate::config::model::AppConfig;
+    use crate::domain::chat::models::BuiltinToolOverrides;
     use crate::domain::session::message_bus::MessageBus;
     use crate::domain::tasks::service::TaskService;
     use crate::infra::llm::client::LlmClient;
@@ -729,6 +754,7 @@ mod tests {
                 tasks,
                 llm_client,
                 "stub-model".to_string(),
+                BuiltinToolOverrides::default(),
             )
             .await
             .unwrap();

@@ -102,6 +102,69 @@ impl McpOverrides {
 }
 
 #[derive(Debug, Clone)]
+pub struct BuiltinToolOverrides {
+    pub enabled: bool,
+    pub allowed_tools: Vec<String>,
+    pub denied_tools: Vec<String>,
+}
+
+impl Default for BuiltinToolOverrides {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            allowed_tools: Vec::new(),
+            denied_tools: Vec::new(),
+        }
+    }
+}
+
+impl BuiltinToolOverrides {
+    pub fn allows(&self, name: &str) -> bool {
+        let normalized = normalize_builtin_tool_name(name);
+        if normalized.is_empty() || !is_builtin_file_tool(normalized) {
+            return false;
+        }
+        if !self.enabled {
+            return false;
+        }
+        if self
+            .denied_tools
+            .iter()
+            .any(|item| normalize_builtin_tool_name(item) == normalized)
+        {
+            return false;
+        }
+        self.allowed_tools.is_empty()
+            || self
+                .allowed_tools
+                .iter()
+                .any(|item| normalize_builtin_tool_name(item) == normalized)
+    }
+}
+
+pub fn is_builtin_file_tool(name: &str) -> bool {
+    matches!(
+        normalize_builtin_tool_name(name),
+        "read_file" | "write_file" | "edit_file"
+    )
+}
+
+pub fn normalize_builtin_tool_list(values: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values
+        .into_iter()
+        .map(|item| normalize_builtin_tool_name(&item).to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| is_builtin_file_tool(item))
+        .filter(|item| seen.insert(item.clone()))
+        .collect()
+}
+
+fn normalize_builtin_tool_name(name: &str) -> &str {
+    name.trim()
+}
+
+#[derive(Debug, Clone)]
 pub struct HitlOverrides {
     pub enabled: bool,
     pub default_action: HitlDefaultAction,
@@ -132,6 +195,7 @@ pub struct ChatRequest {
     pub llm_overrides: LlmOverrides,
     pub prompt_overrides: AgentPromptOverrides,
     pub mcp_overrides: McpOverrides,
+    pub builtin_tool_overrides: BuiltinToolOverrides,
     pub skill_permissions: SkillPermissions,
     pub hitl_overrides: HitlOverrides,
 }
