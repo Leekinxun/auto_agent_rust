@@ -171,12 +171,19 @@ fn normalize_hitl_rules(values: &[HitlPolicyRule]) -> Vec<HitlPolicyRule> {
                 .map(str::trim)
                 .filter(|item| !item.is_empty())
                 .map(str::to_string);
+            let display_name = value
+                .display_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|item| !item.is_empty())
+                .map(str::to_string);
             if tool.is_none() && tool_prefix.is_none() {
                 return None;
             }
             Some(HitlPolicyRule {
                 tool,
                 tool_prefix,
+                display_name,
                 require_approval: value.require_approval,
                 risk_level: value.risk_level.clone(),
             })

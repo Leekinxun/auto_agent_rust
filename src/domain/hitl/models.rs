@@ -48,6 +48,7 @@ pub struct HitlDecisionRequest {
     pub summary: String,
     pub risk_level: HitlRiskLevel,
     pub tool_name: Option<String>,
+    pub display_name: Option<String>,
     pub arguments: Value,
     pub preview: Option<String>,
     pub created_at_ms: u128,
@@ -73,19 +74,25 @@ impl HitlDecisionRequest {
         arguments: Value,
         risk_level: HitlRiskLevel,
         timeout_seconds: u64,
+        display_name: Option<String>,
     ) -> Result<Self> {
         let tool_name = tool_name.trim();
         ensure!(!tool_name.is_empty(), "tool_name cannot be empty");
         let now = now_ms();
+        let display_name = display_name
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let action_name = display_name.as_deref().unwrap_or(tool_name);
         Ok(Self {
             approval_id: new_hitl_approval_id(),
             session_id: session_id.to_string(),
             generation,
             kind: HitlDecisionKind::ToolCall,
-            title: format!("确认执行工具：{tool_name}"),
-            summary: format!("模型请求执行工具 {tool_name}，需要人工确认后继续。"),
+            title: format!("确认执行：{action_name}"),
+            summary: format!("模型请求执行“{action_name}”，需要人工确认后继续。"),
             risk_level,
             tool_name: Some(tool_name.to_string()),
+            display_name,
             preview: Some(preview_json(&arguments, 2_000)),
             arguments,
             created_at_ms: now,
@@ -191,6 +198,7 @@ mod tests {
             json!({"path":"a.md"}),
             HitlRiskLevel::High,
             60,
+            Some("写入文件".to_string()),
         )
         .unwrap();
 
@@ -198,6 +206,8 @@ mod tests {
         assert_eq!(request.session_id, "session-a");
         assert_eq!(request.generation, 7);
         assert_eq!(request.tool_name.as_deref(), Some("write_file"));
+        assert_eq!(request.display_name.as_deref(), Some("写入文件"));
+        assert_eq!(request.title, "确认执行：写入文件");
         assert_eq!(request.status, HitlDecisionStatus::Pending);
         assert!(request.expires_at_ms.is_some());
     }

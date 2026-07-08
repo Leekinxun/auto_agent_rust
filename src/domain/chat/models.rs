@@ -363,6 +363,7 @@ pub enum ChatEvent {
         summary: String,
         risk_level: String,
         tool_name: Option<String>,
+        display_name: Option<String>,
         arguments: serde_json::Value,
     },
     ApprovalResolved {

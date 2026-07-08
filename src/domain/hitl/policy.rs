@@ -21,6 +21,7 @@ impl Default for HitlDefaultAction {
 pub struct HitlPolicyRule {
     pub tool: Option<String>,
     pub tool_prefix: Option<String>,
+    pub display_name: Option<String>,
     pub require_approval: bool,
     pub risk_level: HitlRiskLevel,
 }
@@ -30,6 +31,7 @@ impl Default for HitlPolicyRule {
         Self {
             tool: None,
             tool_prefix: None,
+            display_name: None,
             require_approval: false,
             risk_level: HitlRiskLevel::Medium,
         }
@@ -39,8 +41,13 @@ impl Default for HitlPolicyRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HitlPolicyDecision {
     Allow,
-    Reject { reason: String },
-    RequireApproval { risk_level: HitlRiskLevel },
+    Reject {
+        reason: String,
+    },
+    RequireApproval {
+        risk_level: HitlRiskLevel,
+        display_name: Option<String>,
+    },
 }
 
 pub fn evaluate_tool_hitl_policy(
@@ -60,6 +67,12 @@ pub fn evaluate_tool_hitl_policy(
         return if rule.require_approval {
             HitlPolicyDecision::RequireApproval {
                 risk_level: rule.risk_level.clone(),
+                display_name: rule
+                    .display_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_string),
             }
         } else {
             HitlPolicyDecision::Allow
@@ -70,6 +83,7 @@ pub fn evaluate_tool_hitl_policy(
         HitlDefaultAction::Auto => HitlPolicyDecision::Allow,
         HitlDefaultAction::RequireApproval => HitlPolicyDecision::RequireApproval {
             risk_level: HitlRiskLevel::Medium,
+            display_name: None,
         },
         HitlDefaultAction::Reject => HitlPolicyDecision::Reject {
             reason: "HITL default action rejects unmatched tool calls".to_string(),
@@ -120,7 +134,31 @@ mod tests {
         assert_eq!(
             decision,
             HitlPolicyDecision::RequireApproval {
-                risk_level: HitlRiskLevel::High
+                risk_level: HitlRiskLevel::High,
+                display_name: None
+            }
+        );
+    }
+
+    #[test]
+    fn matching_rule_carries_display_name() {
+        let decision = evaluate_tool_hitl_policy(
+            true,
+            &HitlDefaultAction::Auto,
+            &[HitlPolicyRule {
+                tool: Some("write_file".to_string()),
+                display_name: Some("写入作战文档".to_string()),
+                require_approval: true,
+                risk_level: HitlRiskLevel::High,
+                ..HitlPolicyRule::default()
+            }],
+            "write_file",
+        );
+        assert_eq!(
+            decision,
+            HitlPolicyDecision::RequireApproval {
+                risk_level: HitlRiskLevel::High,
+                display_name: Some("写入作战文档".to_string())
             }
         );
     }

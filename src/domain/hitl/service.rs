@@ -84,6 +84,7 @@ mod tests {
             json!({}),
             HitlRiskLevel::High,
             10,
+            Some("写入文件".to_string()),
         )
         .unwrap();
         let request_path = write_hitl_request(&repo.root, &request).await.unwrap();

@@ -840,6 +840,7 @@ fn chat_event_to_sse(event: ChatEvent) -> Event {
             summary,
             risk_level,
             tool_name,
+            display_name,
             arguments,
         } => sse_event(
             "approval_required",
@@ -850,6 +851,7 @@ fn chat_event_to_sse(event: ChatEvent) -> Event {
                 "summary": summary,
                 "risk_level": risk_level,
                 "tool_name": tool_name,
+                "display_name": display_name,
                 "arguments": arguments,
             }),
         ),

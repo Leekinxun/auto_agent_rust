@@ -1048,7 +1048,10 @@ Skills available (call load_skill to use):
             HitlPolicyDecision::Reject { reason } => Some(format!(
                 "HITL policy rejected tool call {tool_name}: {reason}"
             )),
-            HitlPolicyDecision::RequireApproval { risk_level } => {
+            HitlPolicyDecision::RequireApproval {
+                risk_level,
+                display_name,
+            } => {
                 let Some(session) = session else {
                     return Some(format!(
                         "HITL approval required for {tool_name}, but no session is available to route the approval."
@@ -1071,6 +1074,7 @@ Skills available (call load_skill to use):
                     arguments.clone(),
                     risk_level,
                     hitl_overrides.timeout_seconds,
+                    display_name,
                 ) {
                     Ok(request) => request,
                     Err(error) => return Some(format!("HITL request failed: {error}")),
@@ -1089,6 +1093,7 @@ Skills available (call load_skill to use):
                         summary: request.summary.clone(),
                         risk_level: request.risk_level.as_str().to_string(),
                         tool_name: request.tool_name.clone(),
+                        display_name: request.display_name.clone(),
                         arguments: request.arguments.clone(),
                     },
                 )

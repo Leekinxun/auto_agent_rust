@@ -30,12 +30,15 @@ hitl:
   timeout_seconds: 300
   rules:
     - tool: "write_file"
+      display_name: "写入文件"
       require_approval: true
       risk_level: "high"          #前端展示 风险值
     - tool: "edit_file"
+      display_name: "修改文件"
       require_approval: true
       risk_level: "high"
     - tool_prefix: "mcp_"        #全部mcp。或 mcp_nb_mcp__delete_file
+      display_name: "调用 MCP 工具"
       require_approval: false
       risk_level: "medium"
 
