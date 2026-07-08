@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::model::AppConfig;
-use crate::domain::chat::models::{is_builtin_file_tool, normalize_builtin_tool_list};
+use crate::domain::chat::models::{
+    BUILTIN_TOOL_NAMES, is_builtin_tool, normalize_builtin_tool_list,
+};
 use crate::domain::harness::{
     MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH,
     SKILL_LEARNING_SYSTEM_PATH, SKILL_LEARNING_USER_TEMPLATE_PATH,
@@ -142,6 +144,16 @@ where
     if let Some(value) = first_non_empty_env(get_env, &["SERVER_PORT"]) {
         config.server.port = parse_env::<u16>("SERVER_PORT", &value)?;
     }
+    if let Some(value) = first_non_empty_env(
+        get_env,
+        &[
+            "SERVER_MAX_UPLOAD_SIZE",
+            "AGENT_MAX_UPLOAD_SIZE",
+            "MAX_FILE_SIZE",
+        ],
+    ) {
+        config.server.max_upload_size = parse_positive_usize("SERVER_MAX_UPLOAD_SIZE", &value)?;
+    }
     if let Some(value) = first_non_empty_env(get_env, &["CORS_ALLOW_ORIGINS"]) {
         config.server.cors.allow_origins = split_csv(&value);
     }
@@ -222,13 +234,14 @@ fn parse_builtin_tool_csv(key: &str, raw: &str) -> Result<Vec<String>> {
     let items = split_csv(raw);
     let invalid = items
         .iter()
-        .filter(|item| !is_builtin_file_tool(item))
+        .filter(|item| !is_builtin_tool(item))
         .cloned()
         .collect::<Vec<_>>();
     ensure!(
         invalid.is_empty(),
-        "{key} contains unsupported built-in tool names: {}",
-        invalid.join(", ")
+        "{key} contains unsupported built-in tool names: {}. Supported tools: {}",
+        invalid.join(", "),
+        BUILTIN_TOOL_NAMES.join(", ")
     );
     let normalized = normalize_builtin_tool_list(items.clone());
     Ok(normalized)
@@ -238,30 +251,8 @@ fn apply_builtin_tool_flag_overrides<F>(config: &mut AppConfig, get_env: &F) -> 
 where
     F: Fn(&str) -> Option<String>,
 {
-    for (tool_name, env_keys) in [
-        (
-            "read_file",
-            &[
-                "BUILTIN_TOOL_READ_FILE_ENABLED",
-                "BUILTIN_READ_FILE_ENABLED",
-            ][..],
-        ),
-        (
-            "write_file",
-            &[
-                "BUILTIN_TOOL_WRITE_FILE_ENABLED",
-                "BUILTIN_WRITE_FILE_ENABLED",
-            ][..],
-        ),
-        (
-            "edit_file",
-            &[
-                "BUILTIN_TOOL_EDIT_FILE_ENABLED",
-                "BUILTIN_EDIT_FILE_ENABLED",
-            ][..],
-        ),
-    ] {
-        let Some(raw) = first_non_empty_env(get_env, env_keys) else {
+    for (tool_name, env_keys) in builtin_tool_env_keys() {
+        let Some(raw) = first_non_empty_env(get_env, &env_keys) else {
             continue;
         };
         let enabled = parse_bool_env(env_keys[0], &raw)?;
@@ -272,6 +263,89 @@ where
     config.builtin_tools.denied_tools =
         normalize_builtin_tool_list(config.builtin_tools.denied_tools.clone());
     Ok(())
+}
+
+fn builtin_tool_env_keys() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        ("TodoWrite", vec!["BUILTIN_TOOL_TODO_WRITE_ENABLED"]),
+        (
+            "background_run",
+            vec!["BUILTIN_TOOL_BACKGROUND_RUN_ENABLED"],
+        ),
+        ("broadcast", vec!["BUILTIN_TOOL_BROADCAST_ENABLED"]),
+        (
+            "check_background",
+            vec!["BUILTIN_TOOL_CHECK_BACKGROUND_ENABLED"],
+        ),
+        ("claim_task", vec!["BUILTIN_TOOL_CLAIM_TASK_ENABLED"]),
+        ("compress", vec!["BUILTIN_TOOL_COMPRESS_ENABLED"]),
+        (
+            "edit_file",
+            vec![
+                "BUILTIN_TOOL_EDIT_FILE_ENABLED",
+                "BUILTIN_EDIT_FILE_ENABLED",
+            ],
+        ),
+        ("idle", vec!["BUILTIN_TOOL_IDLE_ENABLED"]),
+        (
+            "list_teammates",
+            vec!["BUILTIN_TOOL_LIST_TEAMMATES_ENABLED"],
+        ),
+        ("load_skill", vec!["BUILTIN_TOOL_LOAD_SKILL_ENABLED"]),
+        ("plan_approval", vec!["BUILTIN_TOOL_PLAN_APPROVAL_ENABLED"]),
+        (
+            "read_file",
+            vec![
+                "BUILTIN_TOOL_READ_FILE_ENABLED",
+                "BUILTIN_READ_FILE_ENABLED",
+            ],
+        ),
+        ("read_inbox", vec!["BUILTIN_TOOL_READ_INBOX_ENABLED"]),
+        ("send_message", vec!["BUILTIN_TOOL_SEND_MESSAGE_ENABLED"]),
+        (
+            "shutdown_request",
+            vec!["BUILTIN_TOOL_SHUTDOWN_REQUEST_ENABLED"],
+        ),
+        (
+            "spawn_teammate",
+            vec!["BUILTIN_TOOL_SPAWN_TEAMMATE_ENABLED"],
+        ),
+        ("task", vec!["BUILTIN_TOOL_TASK_ENABLED"]),
+        (
+            "task_bind_worktree",
+            vec!["BUILTIN_TOOL_TASK_BIND_WORKTREE_ENABLED"],
+        ),
+        ("task_create", vec!["BUILTIN_TOOL_TASK_CREATE_ENABLED"]),
+        ("task_get", vec!["BUILTIN_TOOL_TASK_GET_ENABLED"]),
+        ("task_list", vec!["BUILTIN_TOOL_TASK_LIST_ENABLED"]),
+        ("task_update", vec!["BUILTIN_TOOL_TASK_UPDATE_ENABLED"]),
+        (
+            "worktree_create",
+            vec!["BUILTIN_TOOL_WORKTREE_CREATE_ENABLED"],
+        ),
+        (
+            "worktree_events",
+            vec!["BUILTIN_TOOL_WORKTREE_EVENTS_ENABLED"],
+        ),
+        ("worktree_keep", vec!["BUILTIN_TOOL_WORKTREE_KEEP_ENABLED"]),
+        ("worktree_list", vec!["BUILTIN_TOOL_WORKTREE_LIST_ENABLED"]),
+        (
+            "worktree_remove",
+            vec!["BUILTIN_TOOL_WORKTREE_REMOVE_ENABLED"],
+        ),
+        ("worktree_run", vec!["BUILTIN_TOOL_WORKTREE_RUN_ENABLED"]),
+        (
+            "worktree_status",
+            vec!["BUILTIN_TOOL_WORKTREE_STATUS_ENABLED"],
+        ),
+        (
+            "write_file",
+            vec![
+                "BUILTIN_TOOL_WRITE_FILE_ENABLED",
+                "BUILTIN_WRITE_FILE_ENABLED",
+            ],
+        ),
+    ]
 }
 
 fn set_builtin_tool_flag(config: &mut AppConfig, tool_name: &str, enabled: bool) {
@@ -402,6 +476,7 @@ mod tests {
             ("HITL_TIMEOUT_SECONDS", "120"),
             ("SERVER_HOST", "127.0.0.1"),
             ("SERVER_PORT", "19000"),
+            ("SERVER_MAX_UPLOAD_SIZE", "2097152"),
             ("CORS_ALLOW_ORIGINS", "http://a.example, http://b.example"),
             ("CORS_ALLOW_CREDENTIALS", "true"),
             ("CORS_ALLOW_METHODS", "GET, POST"),
@@ -436,6 +511,7 @@ mod tests {
         assert_eq!(config.hitl.timeout_seconds, 120);
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 19000);
+        assert_eq!(config.server.max_upload_size, 2_097_152);
         assert_eq!(
             config.server.cors.allow_origins,
             vec!["http://a.example", "http://b.example"]
@@ -472,19 +548,24 @@ mod tests {
     fn builtin_tool_name_flags_override_allowed_and_denied_lists() {
         let mut config = AppConfig::default();
         let env = env_map(&[
-            ("BUILTIN_ALLOWED_TOOLS", "read_file, write_file"),
-            ("BUILTIN_DENIED_TOOLS", "edit_file"),
+            ("BUILTIN_ALLOWED_TOOLS", "read_file, task, write_file"),
+            ("BUILTIN_DENIED_TOOLS", "edit_file, load_skill"),
+            ("BUILTIN_TOOL_TASK_ENABLED", "false"),
             ("BUILTIN_TOOL_WRITE_FILE_ENABLED", "false"),
             ("BUILTIN_TOOL_EDIT_FILE_ENABLED", "true"),
+            ("BUILTIN_TOOL_LOAD_SKILL_ENABLED", "true"),
         ]);
 
         apply_env_overrides_with(&mut config, &|key| env.get(key).cloned()).unwrap();
 
         assert_eq!(
             config.builtin_tools.allowed_tools,
-            vec!["read_file", "edit_file"]
+            vec!["read_file", "edit_file", "load_skill"]
         );
-        assert_eq!(config.builtin_tools.denied_tools, vec!["write_file"]);
+        assert_eq!(
+            config.builtin_tools.denied_tools,
+            vec!["task", "write_file"]
+        );
     }
 
     #[test]

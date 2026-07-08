@@ -17,7 +17,7 @@ use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, BuiltinToolOverrides, ChatEvent, ChatMode,
     ChatRequest, ChatResult, HistoryEntry, HitlOverrides, McpServerPreviewDto, McpSettingsPreview,
     OutputFile, SkillPermissions, SkillUsage, SystemPromptPreview, TokenUsageReport,
-    is_builtin_file_tool,
+    is_builtin_tool,
 };
 use crate::domain::chat::tool_context::{
     ToolContextBudget, enforce_tool_turn_budget, prepare_tool_result_for_context,
@@ -1198,7 +1198,7 @@ Skills available (call load_skill to use):
                 .unwrap_or_else(|_| json!({}));
         let tool_name = tool_call.function.name.as_str();
 
-        if is_builtin_file_tool(tool_name) && !builtin_tool_overrides.allows(tool_name) {
+        if is_builtin_tool(tool_name) && !builtin_tool_overrides.allows(tool_name) {
             return format!(
                 "Built-in tool {tool_name} is disabled by the current runtime configuration. Use an authorized MCP tool instead."
             );
@@ -1589,7 +1589,7 @@ Skills available (call load_skill to use):
                     serde_json::from_str::<serde_json::Value>(&tool_call.function.arguments)
                         .unwrap_or_else(|_| json!({}));
                 let tool_name = tool_call.function.name.clone();
-                if is_builtin_file_tool(&tool_name) && !builtin_tool_overrides.allows(&tool_name) {
+                if is_builtin_tool(&tool_name) && !builtin_tool_overrides.allows(&tool_name) {
                     messages.push(ChatMessage::tool(
                         tool_call.id,
                         format!(
@@ -1981,7 +1981,7 @@ fn static_public_tool_schemas(
     include_session_tools: bool,
     builtin_tool_overrides: &BuiltinToolOverrides,
 ) -> Vec<serde_json::Value> {
-    let mut tools = filter_builtin_tool_schemas(public_file_tool_schemas(), builtin_tool_overrides);
+    let mut tools = public_file_tool_schemas();
     tools.extend(public_compaction_tool_schemas());
     tools.extend(public_task_tool_schemas());
     tools.extend(public_worktree_tool_schemas());
@@ -2017,7 +2017,7 @@ fn static_public_tool_schemas(
             }
         }
     }));
-    tools
+    filter_builtin_tool_schemas(tools, builtin_tool_overrides)
 }
 
 fn filter_builtin_tool_schemas(
@@ -2030,7 +2030,7 @@ fn filter_builtin_tool_schemas(
             let Some(name) = schema_function_name(tool) else {
                 return true;
             };
-            !is_builtin_file_tool(name) || builtin_tool_overrides.allows(name)
+            !is_builtin_tool(name) || builtin_tool_overrides.allows(name)
         })
         .collect()
 }
@@ -2543,7 +2543,7 @@ mod tests {
         log_final_reply, resolve_max_iterations, static_public_tool_schemas,
     };
     use crate::config::model::AppConfig;
-    use crate::domain::chat::models::LlmOverrides;
+    use crate::domain::chat::models::{BuiltinToolOverrides, LlmOverrides};
     use crate::domain::chat::orchestrator::ChatOrchestrator;
     use crate::domain::events::service::EventService;
     use crate::domain::harness::HarnessAssets;
@@ -2612,6 +2612,37 @@ mod tests {
         .collect::<HashSet<_>>();
 
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn static_public_tool_surface_honors_builtin_tool_overrides() {
+        let overrides = BuiltinToolOverrides {
+            denied_tools: vec![
+                "read_file".to_string(),
+                "task".to_string(),
+                "TodoWrite".to_string(),
+                "worktree_run".to_string(),
+                "load_skill".to_string(),
+            ],
+            ..Default::default()
+        };
+        let actual = static_public_tool_schemas(true, &overrides)
+            .into_iter()
+            .filter_map(|tool| {
+                tool.get("function")
+                    .and_then(|value| value.get("name"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .collect::<HashSet<_>>();
+
+        assert!(!actual.contains("read_file"));
+        assert!(!actual.contains("task"));
+        assert!(!actual.contains("TodoWrite"));
+        assert!(!actual.contains("worktree_run"));
+        assert!(!actual.contains("load_skill"));
+        assert!(actual.contains("write_file"));
+        assert!(actual.contains("task_create"));
     }
 
     #[test]

@@ -8,6 +8,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router, body::Bytes};
 use futures_util::StreamExt;
 use serde::Deserialize;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 
@@ -15,9 +16,9 @@ use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse, SteeringResponse
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
 use crate::domain::chat::models::{
-    AgentPromptOverrides, BuiltinToolOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry,
-    HitlOverrides, LlmOverrides, McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
-    is_builtin_file_tool, normalize_builtin_tool_list,
+    AgentPromptOverrides, BUILTIN_TOOL_NAMES, BuiltinToolOverrides, ChatEvent, ChatMode,
+    ChatRequest, HistoryEntry, HitlOverrides, LlmOverrides, McpOverrides, SkillPermissions,
+    SteeringSubmission, UploadedFile, is_builtin_tool, normalize_builtin_tool_list,
 };
 use crate::domain::hitl::models::HitlDecisionResolution;
 use crate::domain::hitl::policy::HitlDefaultAction;
@@ -612,14 +613,13 @@ async fn parse_chat_multipart(
 
 async fn save_upload(
     state: SharedState,
-    field: axum::extract::multipart::Field<'_>,
+    mut field: axum::extract::multipart::Field<'_>,
 ) -> ApiResult<UploadedFile> {
     let filename = field
         .file_name()
         .map(|value| value.to_string())
         .ok_or_else(|| ApiError::bad_request("上传文件缺少文件名"))?;
     let content_type = field.content_type().map(|value| value.to_string());
-    let bytes = field.bytes().await.map_err(anyhow::Error::from)?;
     let upload_dir = state.repo_root.join("uploads");
     tokio::fs::create_dir_all(&upload_dir)
         .await
@@ -629,21 +629,34 @@ async fn save_upload(
         .duration_since(UNIX_EPOCH)
         .map_err(anyhow::Error::from)?
         .as_secs();
-    let safe_filename = format!(
-        "{}_{}_{}",
-        timestamp,
-        filesafe_fragment(&filename),
-        filename
-    );
+    let safe_filename = format!("{}_{}", timestamp, filesafe_fragment(&filename));
     let saved_path = upload_dir.join(safe_filename);
-    tokio::fs::write(&saved_path, &bytes)
+
+    let max_upload_size = state.config.server.max_upload_size;
+    let mut output = tokio::fs::File::create(&saved_path)
         .await
         .map_err(anyhow::Error::from)?;
+    let mut size = 0usize;
+    while let Some(chunk) = field.chunk().await.map_err(anyhow::Error::from)? {
+        size = size.saturating_add(chunk.len());
+        if size > max_upload_size {
+            drop(output);
+            let _ = tokio::fs::remove_file(&saved_path).await;
+            return Err(ApiError::payload_too_large(format!(
+                "上传文件超过限制: {size} > {max_upload_size}"
+            )));
+        }
+        output
+            .write_all(&chunk)
+            .await
+            .map_err(anyhow::Error::from)?;
+    }
+    output.flush().await.map_err(anyhow::Error::from)?;
 
     Ok(UploadedFile {
         original_name: filename,
         saved_path: saved_path.display().to_string(),
-        size: bytes.len(),
+        size,
         content_type,
     })
 }
@@ -742,13 +755,14 @@ fn parse_builtin_tool_list(raw: &str, label: &str) -> ApiResult<Vec<String>> {
     let parsed = parse_string_list(Some(raw), label)?;
     let invalid = parsed
         .iter()
-        .filter(|item| !is_builtin_file_tool(item))
+        .filter(|item| !is_builtin_tool(item))
         .cloned()
         .collect::<Vec<_>>();
     if !invalid.is_empty() {
         return Err(ApiError::bad_request(format!(
-            "{label} 包含不支持的内置工具: {}",
-            invalid.join(", ")
+            "{label} 包含不支持的内置工具: {}。支持的工具: {}",
+            invalid.join(", "),
+            BUILTIN_TOOL_NAMES.join(", ")
         )));
     }
     Ok(normalize_builtin_tool_list(parsed))

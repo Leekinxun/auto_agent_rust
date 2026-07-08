@@ -133,6 +133,7 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub reload: bool,
+    pub max_upload_size: usize,
     pub cors: CorsConfig,
 }
 
@@ -142,6 +143,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             reload: true,
+            max_upload_size: 100 * 1024 * 1024,
             cors: CorsConfig::default(),
         }
     }

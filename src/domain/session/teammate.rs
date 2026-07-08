@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
 
-use crate::domain::chat::models::{BuiltinToolOverrides, is_builtin_file_tool};
+use crate::domain::chat::models::{BuiltinToolOverrides, is_builtin_tool};
 use crate::domain::tasks::service::TaskService;
 use crate::infra::fs::tool_ops::dispatch_public_file_tool;
 use crate::infra::llm::client::LlmClient;
@@ -343,39 +343,40 @@ impl TeammateManager {
                 }
 
                 for tool_call in &tool_calls {
+                    let tool_name = tool_call.function.name.as_str();
                     let arguments = serde_json::from_str::<Value>(&tool_call.function.arguments)
                         .unwrap_or_else(|_| json!({}));
-                    let output = match tool_call.function.name.as_str() {
-                        "idle" => {
-                            idle_requested = true;
-                            "Entering idle phase.".to_string()
-                        }
-                        "claim_task" => parse_u64_arg(&arguments, "task_id", "claim_task")
-                            .and_then(|task_id| task_service.claim(task_id, &name))
-                            .unwrap_or_else(|error| format!("Error: {error}")),
-                        "send_message" => parse_string_arg(&arguments, "to", "send_message")
-                            .and_then(|to| {
-                                parse_string_arg(&arguments, "content", "send_message").and_then(
-                                    |content| self.bus.send(&name, to, content, "message", None),
-                                )
-                            })
-                            .unwrap_or_else(|error| format!("Error: {error}")),
-                        "read_file" | "write_file" | "edit_file" => {
-                            let tool_name = tool_call.function.name.as_str();
-                            if is_builtin_file_tool(tool_name)
-                                && !builtin_tool_overrides.allows(tool_name)
-                            {
-                                format!(
-                                    "Built-in tool {tool_name} is disabled by the current runtime configuration."
-                                )
-                            } else {
+                    let output = if is_builtin_tool(tool_name)
+                        && !builtin_tool_overrides.allows(tool_name)
+                    {
+                        format!(
+                            "Built-in tool {tool_name} is disabled by the current runtime configuration."
+                        )
+                    } else {
+                        match tool_name {
+                            "idle" => {
+                                idle_requested = true;
+                                "Entering idle phase.".to_string()
+                            }
+                            "claim_task" => parse_u64_arg(&arguments, "task_id", "claim_task")
+                                .and_then(|task_id| task_service.claim(task_id, &name))
+                                .unwrap_or_else(|error| format!("Error: {error}")),
+                            "send_message" => parse_string_arg(&arguments, "to", "send_message")
+                                .and_then(|to| {
+                                    parse_string_arg(&arguments, "content", "send_message")
+                                        .and_then(|content| {
+                                            self.bus.send(&name, to, content, "message", None)
+                                        })
+                                })
+                                .unwrap_or_else(|error| format!("Error: {error}")),
+                            "read_file" | "write_file" | "edit_file" => {
                                 dispatch_public_file_tool(&self.repo_root, tool_name, &arguments)
                                     .unwrap_or_else(|| {
                                         format!("Unknown tool: {}", tool_call.function.name)
                                     })
                             }
+                            other => format!("Unknown tool: {other}"),
                         }
-                        other => format!("Unknown tool: {other}"),
                     };
                     messages.push(ChatMessage::tool(
                         tool_call.id.clone(),
@@ -584,7 +585,7 @@ fn teammate_tool_schemas(builtin_tool_overrides: &BuiltinToolOverrides) -> Vec<V
         else {
             return true;
         };
-        !is_builtin_file_tool(name) || builtin_tool_overrides.allows(name)
+        !is_builtin_tool(name) || builtin_tool_overrides.allows(name)
     });
     tools
 }

@@ -3,6 +3,7 @@ pub mod errors;
 pub mod routes;
 
 use axum::Router;
+use axum::extract::DefaultBodyLimit;
 use axum::http::{HeaderName, HeaderValue, Method};
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -11,6 +12,8 @@ use tower_http::trace::TraceLayer;
 use crate::app_state::SharedState;
 
 pub fn build_router(state: SharedState) -> Router {
+    let max_upload_size = state.config.server.max_upload_size;
+
     Router::new()
         .merge(routes::health::router())
         .nest("/agent", routes::agent_router())
@@ -18,6 +21,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/", axum::routing::get(routes::frontend::index))
         .fallback(routes::frontend::fallback)
         .layer(TraceLayer::new_for_http())
+        .layer(DefaultBodyLimit::max(max_upload_size))
         .layer(build_cors_layer(&state))
         .with_state(state)
 }
