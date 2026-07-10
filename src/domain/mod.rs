@@ -3,6 +3,7 @@ pub mod events;
 pub mod harness;
 pub mod hitl;
 pub mod memory;
+pub mod run_capture;
 pub mod session;
 pub mod settings;
 pub mod skills;

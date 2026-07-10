@@ -68,7 +68,7 @@ impl Default for AgentConfig {
             top_p: None,
             max_iterations: 8,
             subagent_max_iterations: 30,
-            auto_compact_token_threshold: 60_000,
+            auto_compact_token_threshold: 80_000,
             tool_result_size_chars: 100_000,
             tool_turn_budget_chars: 200_000,
             tool_result_preview_chars: 1_500,

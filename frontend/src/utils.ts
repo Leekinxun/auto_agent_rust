@@ -1,5 +1,10 @@
 import { marked } from "marked";
 import type {
+  AgentRunDetail,
+  AgentRunManifest,
+  AgentRunReplay,
+  AgentRunStep,
+  AgentRunTranscript,
   AppSettings,
   ChatModeConfig,
   ChatModeId,
@@ -418,6 +423,105 @@ export function normalizeHarnessTraces(value: unknown): HarnessRunTrace[] {
         finalReplyRecovered: Boolean(outcome.final_reply_recovered),
         selfEvolutionExecuted: Boolean(outcome.self_evolution_executed)
       }
+    }];
+  });
+}
+
+export function normalizeAgentRunManifests(value: unknown): AgentRunManifest[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    const manifest = normalizeAgentRunManifest(item);
+    return manifest ? [manifest] : [];
+  });
+}
+
+export function normalizeAgentRunManifest(value: unknown): AgentRunManifest | null {
+  if (!isRecord(value) || typeof value.run_id !== "string") {
+    return null;
+  }
+  return {
+    runId: value.run_id,
+    traceId: typeof value.trace_id === "string" ? value.trace_id : "",
+    userId: typeof value.user_id === "string" ? value.user_id : "",
+    sessionId: typeof value.session_id === "string" ? value.session_id : null,
+    mode: typeof value.mode === "string" ? value.mode : "",
+    runKind: typeof value.run_kind === "string" ? value.run_kind : "",
+    modelId: typeof value.model_id === "string" ? value.model_id : "",
+    harnessSnapshotId: typeof value.harness_snapshot_id === "string" ? value.harness_snapshot_id : "",
+    startedAtMs: typeof value.started_at_ms === "number" ? value.started_at_ms : 0,
+    finishedAtMs: typeof value.finished_at_ms === "number" ? value.finished_at_ms : null,
+    status: typeof value.status === "string" ? value.status : "",
+    finishReason: typeof value.finish_reason === "string" ? value.finish_reason : null,
+    error: typeof value.error === "string" ? value.error : null,
+    stepCount: typeof value.step_count === "number" ? value.step_count : 0,
+    lastStepIndex: typeof value.last_step_index === "number" ? value.last_step_index : null
+  };
+}
+
+export function normalizeAgentRunDetail(value: unknown): AgentRunDetail | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const manifest = normalizeAgentRunManifest(value.manifest);
+  if (!manifest) {
+    return null;
+  }
+  return {
+    manifest,
+    steps: normalizeAgentRunSteps(value.steps)
+  };
+}
+
+export function normalizeAgentRunReplay(value: unknown): AgentRunReplay | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const manifest = normalizeAgentRunManifest(value.manifest);
+  if (!manifest || typeof value.run_id !== "string") {
+    return null;
+  }
+  return {
+    runId: value.run_id,
+    fromStepIndex: typeof value.from_step_index === "number" ? value.from_step_index : 0,
+    manifest,
+    steps: normalizeAgentRunSteps(value.steps),
+    replayMode: typeof value.replay_mode === "string" ? value.replay_mode : ""
+  };
+}
+
+export function normalizeAgentRunTranscript(value: unknown): AgentRunTranscript | null {
+  if (!isRecord(value) || typeof value.transcript_id !== "string") {
+    return null;
+  }
+  return {
+    transcriptId: value.transcript_id,
+    path: typeof value.path === "string" ? value.path : "",
+    truncated: value.truncated === true,
+    contentJsonl: typeof value.content_jsonl === "string" ? value.content_jsonl : ""
+  };
+}
+
+function normalizeAgentRunSteps(value: unknown): AgentRunStep[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.flatMap((item) => {
+    if (!isRecord(item) || typeof item.run_id !== "string") {
+      return [];
+    }
+    return [{
+      runId: item.run_id,
+      stepIndex: typeof item.step_index === "number" ? item.step_index : 0,
+      kind: typeof item.kind === "string" ? item.kind : "",
+      createdAtMs: typeof item.created_at_ms === "number" ? item.created_at_ms : 0,
+      iteration: typeof item.iteration === "number" ? item.iteration : 0,
+      tokenEstimateBefore: typeof item.token_estimate_before === "number" ? item.token_estimate_before : 0,
+      tokenEstimateAfter: typeof item.token_estimate_after === "number" ? item.token_estimate_after : 0,
+      messagesBefore: Array.isArray(item.messages_before) ? item.messages_before : [],
+      messagesAfter: Array.isArray(item.messages_after) ? item.messages_after : [],
+      payload: isRecord(item.payload) ? item.payload : {}
     }];
   });
 }

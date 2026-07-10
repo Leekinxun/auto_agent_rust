@@ -149,6 +149,8 @@ pub const BUILTIN_TOOL_NAMES: &[&str] = &[
     "check_background",
     "claim_task",
     "compress",
+    "compress_context",
+    "context_transcript_get",
     "edit_file",
     "idle",
     "list_teammates",

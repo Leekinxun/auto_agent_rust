@@ -1,6 +1,10 @@
 import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Navigate, Route, Routes, useLocation, useNavigate, useParams } from "react-router-dom";
 import type {
+  AgentRunDetail,
+  AgentRunManifest,
+  AgentRunReplay,
+  AgentRunTranscript,
   AppSettings,
   ChatModeConfig,
   ChatModeId,
@@ -56,6 +60,10 @@ import {
   normalizeHarnessSignals,
   normalizeHarnessSnapshot,
   normalizeHarnessTraces,
+  normalizeAgentRunDetail,
+  normalizeAgentRunManifests,
+  normalizeAgentRunReplay,
+  normalizeAgentRunTranscript,
   normalizeSharedFrontendSettings,
   normalizeStringList,
   normalizeUserMcpPermissions,
@@ -110,6 +118,7 @@ type HarnessWorkspaceState = {
   decisions: HarnessDecisionRecord[];
   approvals: HarnessApprovalRecord[];
   drafts: HarnessDecisionDraft[];
+  runs: AgentRunManifest[];
 };
 
 type HarnessApplyPayload = {
@@ -784,7 +793,8 @@ export default function App() {
     traces: [],
     decisions: [],
     approvals: [],
-    drafts: []
+    drafts: [],
+    runs: []
   });
   const mcpHealthCacheRef = useRef<McpHealthCache | null>(null);
 
@@ -1011,12 +1021,13 @@ export default function App() {
     void Promise.all([
       fetchJson("/agent/harness/snapshot"),
       fetchJson("/agent/harness/signals?limit=20"),
-      fetchJson("/agent/harness/traces?limit=20"),
-      fetchJson("/agent/harness/decisions?limit=20"),
-      fetchJson("/agent/harness/approvals?limit=20"),
-      fetchJson("/agent/harness/drafts?limit=20")
-    ])
-      .then(([snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData]) => {
+	      fetchJson("/agent/harness/traces?limit=20"),
+	      fetchJson("/agent/harness/decisions?limit=20"),
+	      fetchJson("/agent/harness/approvals?limit=20"),
+	      fetchJson("/agent/harness/drafts?limit=20"),
+	      fetchJson(`/agent/runs?limit=50&user_id=${encodeURIComponent(settings.memoryUserId || DEFAULT_MEMORY_USER_ID)}`)
+	    ])
+	      .then(([snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData, runsData]) => {
         if (cancelled) {
           return;
         }
@@ -1027,10 +1038,11 @@ export default function App() {
           snapshot: normalizeHarnessSnapshot(snapshotData),
           signals: normalizeHarnessSignals(signalsData),
           traces: normalizeHarnessTraces(tracesData),
-          decisions: normalizeHarnessDecisions(decisionsData),
-          approvals: normalizeHarnessApprovals(approvalsData),
-          drafts: normalizeHarnessDrafts(draftsData)
-        }));
+	          decisions: normalizeHarnessDecisions(decisionsData),
+	          approvals: normalizeHarnessApprovals(approvalsData),
+	          drafts: normalizeHarnessDrafts(draftsData),
+	          runs: normalizeAgentRunManifests(runsData)
+	        }));
       })
       .catch((error) => {
         if (cancelled) {
@@ -1043,16 +1055,17 @@ export default function App() {
           snapshot: null,
           signals: null,
           traces: [],
-          decisions: [],
-          approvals: [],
-          drafts: []
-        }));
+	          decisions: [],
+	          approvals: [],
+	          drafts: [],
+	          runs: []
+	        }));
       });
 
     return () => {
       cancelled = true;
     };
-  }, [currentView, settings.apiBase, draftApiBase, draftMcpBaseUrls, draftMcpConfigPath, draftMcpDisabledUrls, draftMcpLazyUrls, draftMcpUserPermissions, draftMemoryUserId]);
+	  }, [currentView, settings.apiBase, settings.memoryUserId, draftApiBase, draftMcpBaseUrls, draftMcpConfigPath, draftMcpDisabledUrls, draftMcpLazyUrls, draftMcpUserPermissions, draftMemoryUserId]);
 
   function showToast(message: string, tone: ToastItem["tone"]) {
     const id = createId("toast");
@@ -1252,14 +1265,15 @@ export default function App() {
       error: ""
     }));
     try {
-      const [snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData] = await Promise.all([
-        fetchJson("/agent/harness/snapshot"),
-        fetchJson("/agent/harness/signals?limit=20"),
-        fetchJson("/agent/harness/traces?limit=20"),
-        fetchJson("/agent/harness/decisions?limit=20"),
-        fetchJson("/agent/harness/approvals?limit=20"),
-        fetchJson("/agent/harness/drafts?limit=20")
-      ]);
+	      const [snapshotData, signalsData, tracesData, decisionsData, approvalsData, draftsData, runsData] = await Promise.all([
+	        fetchJson("/agent/harness/snapshot"),
+	        fetchJson("/agent/harness/signals?limit=20"),
+	        fetchJson("/agent/harness/traces?limit=20"),
+	        fetchJson("/agent/harness/decisions?limit=20"),
+	        fetchJson("/agent/harness/approvals?limit=20"),
+	        fetchJson("/agent/harness/drafts?limit=20"),
+	        fetchJson(`/agent/runs?limit=50&user_id=${encodeURIComponent(settings.memoryUserId || DEFAULT_MEMORY_USER_ID)}`)
+	      ]);
       setHarnessWorkspace((current) => ({
         ...current,
         loading: false,
@@ -1267,10 +1281,11 @@ export default function App() {
         snapshot: normalizeHarnessSnapshot(snapshotData),
         signals: normalizeHarnessSignals(signalsData),
         traces: normalizeHarnessTraces(tracesData),
-        decisions: normalizeHarnessDecisions(decisionsData),
-        approvals: normalizeHarnessApprovals(approvalsData),
-        drafts: normalizeHarnessDrafts(draftsData)
-      }));
+	        decisions: normalizeHarnessDecisions(decisionsData),
+	        approvals: normalizeHarnessApprovals(approvalsData),
+	        drafts: normalizeHarnessDrafts(draftsData),
+	        runs: normalizeAgentRunManifests(runsData)
+	      }));
     } catch (error) {
       setHarnessWorkspace((current) => ({
         ...current,
@@ -1279,6 +1294,29 @@ export default function App() {
       }));
       throw error;
     }
+  }
+
+  async function fetchAgentRunDetail(run: AgentRunManifest): Promise<AgentRunDetail | null> {
+    const data = await fetchJson(`/agent/runs/${encodeURIComponent(run.userId)}/${encodeURIComponent(run.runId)}`);
+    return normalizeAgentRunDetail(data);
+  }
+
+  async function replayAgentRun(run: AgentRunManifest, fromStepIndex: number): Promise<AgentRunReplay | null> {
+    const data = await fetchJson(
+      `/agent/runs/${encodeURIComponent(run.userId)}/${encodeURIComponent(run.runId)}/replay?from_step_index=${fromStepIndex}`,
+      { method: "POST" }
+    );
+    return normalizeAgentRunReplay(data);
+  }
+
+  async function fetchAgentRunTranscript(
+    run: AgentRunManifest,
+    transcriptId: string
+  ): Promise<AgentRunTranscript | null> {
+    const data = await fetchJson(
+      `/agent/runs/${encodeURIComponent(run.userId)}/${encodeURIComponent(run.runId)}/transcripts/${encodeURIComponent(transcriptId)}`
+    );
+    return normalizeAgentRunTranscript(data);
   }
 
   async function saveHarnessDraftAsDecision(draft: HarnessDecisionDraft) {
@@ -2202,6 +2240,7 @@ export default function App() {
                     savingDraftId={harnessWorkspace.savingDraftId}
                     signals={harnessWorkspace.signals}
                     snapshot={harnessWorkspace.snapshot}
+                    runs={harnessWorkspace.runs}
                     traces={harnessWorkspace.traces}
                     onRefresh={() => {
                       void refreshHarnessWorkspace().catch((error) => {
@@ -2210,6 +2249,9 @@ export default function App() {
                     }}
                     onApply={applyHarnessPayload}
                     onPreview={previewHarnessPayload}
+                    onRunDetail={fetchAgentRunDetail}
+                    onRunReplay={replayAgentRun}
+                    onRunTranscript={fetchAgentRunTranscript}
                     onRollback={rollbackHarnessApproval}
                     onSaveDraft={(draft) => {
                       void saveHarnessDraftAsDecision(draft);
@@ -3809,6 +3851,29 @@ function getTraceStatusClass(trace: HarnessRunTrace) {
   return "status-accepted";
 }
 
+function findTranscriptId(value: unknown): string | null {
+  if (isRecord(value)) {
+    if (typeof value.transcript_id === "string" && value.transcript_id.trim()) {
+      return value.transcript_id.trim();
+    }
+    for (const nested of Object.values(value)) {
+      const found = findTranscriptId(nested);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  if (Array.isArray(value)) {
+    for (const nested of value) {
+      const found = findTranscriptId(nested);
+      if (found) {
+        return found;
+      }
+    }
+  }
+  return null;
+}
+
 type HarnessApplyEditorState = {
   sourceKind: "draft" | "decision";
   decisionId?: string;
@@ -3919,6 +3984,7 @@ function HarnessWorkspace(props: {
   snapshot: HarnessSnapshot | null;
   signals: HarnessSignalSummary | null;
   traces: HarnessRunTrace[];
+  runs: AgentRunManifest[];
   decisions: HarnessDecisionRecord[];
   approvals: HarnessApprovalRecord[];
   drafts: HarnessDecisionDraft[];
@@ -3926,6 +3992,9 @@ function HarnessWorkspace(props: {
   onRefresh: () => void;
   onPreview: (payload: HarnessApplyPayload) => Promise<HarnessApplyPreview | null>;
   onApply: (payload: HarnessApplyPayload) => Promise<void>;
+  onRunDetail: (run: AgentRunManifest) => Promise<AgentRunDetail | null>;
+  onRunReplay: (run: AgentRunManifest, fromStepIndex: number) => Promise<AgentRunReplay | null>;
+  onRunTranscript: (run: AgentRunManifest, transcriptId: string) => Promise<AgentRunTranscript | null>;
   onRollback: (approval: HarnessApprovalRecord, approvedBy: string) => Promise<void>;
   onSaveDraft: (draft: HarnessDecisionDraft) => void;
 }) {
@@ -3937,6 +4006,7 @@ function HarnessWorkspace(props: {
     snapshot,
     signals,
     traces,
+    runs,
     decisions,
     approvals,
     drafts,
@@ -3944,6 +4014,9 @@ function HarnessWorkspace(props: {
     onRefresh,
     onPreview,
     onApply,
+    onRunDetail,
+    onRunReplay,
+    onRunTranscript,
     onRollback,
     onSaveDraft
   } = props;
@@ -3955,6 +4028,11 @@ function HarnessWorkspace(props: {
   const [traceQuery, setTraceQuery] = useState("");
   const [decisionFilter, setDecisionFilter] = useState<"all" | HarnessDecisionStatus>("all");
   const [approvalFilter, setApprovalFilter] = useState<"all" | HarnessApprovalStatus>("all");
+  const [selectedRunDetail, setSelectedRunDetail] = useState<AgentRunDetail | null>(null);
+  const [selectedReplay, setSelectedReplay] = useState<AgentRunReplay | null>(null);
+  const [selectedTranscript, setSelectedTranscript] = useState<AgentRunTranscript | null>(null);
+  const [runLoadingId, setRunLoadingId] = useState<string | null>(null);
+  const [runError, setRunError] = useState("");
 
   const normalizedTraceQuery = traceQuery.trim().toLowerCase();
   const filteredTraces = traces.filter((trace) => {
@@ -3984,14 +4062,58 @@ function HarnessWorkspace(props: {
     return haystack.includes(normalizedTraceQuery);
   });
 
-  const filteredDecisions = decisions.filter((decision) =>
-    decisionFilter === "all" ? true : decision.status === decisionFilter
-  );
-  const filteredApprovals = approvals.filter((approval) =>
-    approvalFilter === "all" ? true : approval.status === approvalFilter
-  );
+	  const filteredDecisions = decisions.filter((decision) =>
+	    decisionFilter === "all" ? true : decision.status === decisionFilter
+	  );
+	  const filteredApprovals = approvals.filter((approval) =>
+	    approvalFilter === "all" ? true : approval.status === approvalFilter
+	  );
 
-  const openDraftApplyEditor = (draft: HarnessDecisionDraft) => {
+  async function openRunDetail(run: AgentRunManifest) {
+    setRunLoadingId(run.runId);
+    setRunError("");
+    try {
+      const detail = await onRunDetail(run);
+      setSelectedRunDetail(detail);
+      setSelectedReplay(null);
+      setSelectedTranscript(null);
+    } catch (error) {
+      setRunError(getErrorMessage(error));
+    } finally {
+      setRunLoadingId(null);
+    }
+  }
+
+  async function openRunReplay(run: AgentRunManifest, fromStepIndex: number) {
+    setRunLoadingId(`${run.runId}:replay:${fromStepIndex}`);
+    setRunError("");
+    try {
+      const replay = await onRunReplay(run, fromStepIndex);
+      setSelectedReplay(replay);
+      if (replay) {
+        setSelectedRunDetail({ manifest: replay.manifest, steps: replay.steps });
+      }
+      setSelectedTranscript(null);
+    } catch (error) {
+      setRunError(getErrorMessage(error));
+    } finally {
+      setRunLoadingId(null);
+    }
+  }
+
+  async function openRunTranscript(run: AgentRunManifest, transcriptId: string) {
+    setRunLoadingId(`${run.runId}:transcript:${transcriptId}`);
+    setRunError("");
+    try {
+      setSelectedTranscript(await onRunTranscript(run, transcriptId));
+    } catch (error) {
+      setRunError(getErrorMessage(error));
+    } finally {
+      setRunLoadingId(null);
+    }
+  }
+
+	  const openDraftApplyEditor = (draft: HarnessDecisionDraft) => {
     setPreviewError("");
     setApplyEditor(createHarnessApplyEditorFromDraft(draft, snapshot, memoryUserId));
   };
@@ -4135,6 +4257,107 @@ function HarnessWorkspace(props: {
             <p>{signals ? `成功 ${signals.successTraces} · 错误 ${signals.errorTraces} · recovery ${signals.finalReplyRecoveredTraces}` : "等待 traces 加载"}</p>
           </article>
         </div>
+	      </section>
+
+      <section className="panel settings-card harness-card">
+        <div className="section-head">
+          <div>
+            <h3>Agent Run 回放</h3>
+            <span>所有传入 user_id 的对话会保存完整步骤，可查看中间消息、工具结果与离线 replay 样本。</span>
+          </div>
+          <div className="harness-toolbar-meta">当前用户 {memoryUserId || DEFAULT_MEMORY_USER_ID} · {runs.length} runs</div>
+        </div>
+        {runError ? <div className="empty-block">加载 run 失败：{runError}</div> : null}
+        {!runs.length ? <div className="empty-block">当前 user_id 还没有可回放的 agent run。</div> : null}
+        {runs.length ? (
+          <div className="harness-stack">
+            {runs.map((run) => (
+              <details className="harness-item-card" key={run.runId}>
+                <summary className="harness-summary">
+                  <div>
+                    <div className="harness-chip-row">
+                      <div className={`soft-chip ${run.status === "error" ? "status-rejected" : run.status === "success" ? "status-accepted" : ""}`}>{run.status}</div>
+                      <div className="soft-chip">{run.mode} · {run.runKind}</div>
+                    </div>
+                    <h4>{run.runId}</h4>
+                    <p>{run.stepCount} steps · {run.finishReason || "running"} · {run.modelId}</p>
+                  </div>
+                  <span className="harness-summary-meta">{formatDateTime(run.finishedAtMs || run.startedAtMs)}</span>
+                </summary>
+                <div className="preview-metadata">
+                  <div className="preview-meta-item">
+                    <strong>Trace</strong>
+                    <ExpandableInlineValue value={run.traceId} />
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Session</strong>
+                    <ExpandableInlineValue value={run.sessionId || "—"} />
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>Snapshot</strong>
+                    <ExpandableInlineValue value={run.harnessSnapshotId} />
+                  </div>
+                  <div className="preview-meta-item">
+                    <strong>User</strong>
+                    <ExpandableInlineValue value={run.userId} />
+                  </div>
+                </div>
+                <div className="button-row harness-inline-actions">
+                  <button className="button secondary" disabled={runLoadingId === run.runId} onClick={() => { void openRunDetail(run); }} type="button">
+                    {runLoadingId === run.runId ? "加载中..." : "查看步骤"}
+                  </button>
+                  <button className="button ghost" disabled={runLoadingId === `${run.runId}:replay:0`} onClick={() => { void openRunReplay(run, 0); }} type="button">
+                    离线 replay
+                  </button>
+                </div>
+              </details>
+            ))}
+          </div>
+        ) : null}
+        {selectedRunDetail ? (
+          <div className="harness-stack">
+            <div className="harness-rich-block">
+              <strong>{selectedReplay ? `Replay · ${selectedReplay.replayMode}` : "Run Steps"}</strong>
+              <p>{selectedRunDetail.manifest.runId} · {selectedRunDetail.steps.length} steps</p>
+            </div>
+            {selectedRunDetail.steps.slice(0, 12).map((step) => {
+              const transcriptId = findTranscriptId(step.payload);
+              return (
+                <details className="harness-item-card" key={`${step.runId}-${step.stepIndex}`}>
+                  <summary className="harness-summary">
+                    <div>
+                      <div className="harness-chip-row">
+                        <div className="soft-chip">#{step.stepIndex}</div>
+                        <div className="soft-chip">{step.kind}</div>
+                      </div>
+                      <h4>iteration {step.iteration}</h4>
+	                    <p>tokens {step.tokenEstimateBefore} {"->"} {step.tokenEstimateAfter}</p>
+                    </div>
+                    <span className="harness-summary-meta">{formatDateTime(step.createdAtMs)}</span>
+                  </summary>
+                  <pre className="code-block">{JSON.stringify(step.payload, null, 2)}</pre>
+                  <div className="button-row harness-inline-actions">
+                    <button className="button ghost" disabled={runLoadingId === `${step.runId}:replay:${step.stepIndex}`} onClick={() => { void openRunReplay(selectedRunDetail.manifest, step.stepIndex); }} type="button">
+                      从此步 replay
+                    </button>
+                    {transcriptId ? (
+                      <button className="button secondary" disabled={runLoadingId === `${step.runId}:transcript:${transcriptId}`} onClick={() => { void openRunTranscript(selectedRunDetail.manifest, transcriptId); }} type="button">
+                        查看完整上下文
+                      </button>
+                    ) : null}
+                  </div>
+                </details>
+              );
+            })}
+            {selectedTranscript ? (
+              <div className="harness-rich-block">
+                <strong>完整上下文 · {selectedTranscript.transcriptId}</strong>
+                <p>{selectedTranscript.path}{selectedTranscript.truncated ? " · 已截断" : ""}</p>
+                <pre className="code-block">{selectedTranscript.contentJsonl}</pre>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
       </section>
 
       <section className="panel settings-card harness-card">

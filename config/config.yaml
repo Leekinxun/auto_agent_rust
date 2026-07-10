@@ -12,7 +12,7 @@ agent:
   temperature: 0.2
   max_iterations: 8
   subagent_max_iterations: 30
-  auto_compact_token_threshold: 60000
+  auto_compact_token_threshold: 80000
   tool_result_size_chars: 100000      # 单个工具结果超过该字符数时，落盘并只把预览+路径放入上下文（Hermes 风格）
   tool_turn_budget_chars: 200000      # 单轮多个工具结果总字符预算，超出后优先落盘最大结果
   tool_result_preview_chars: 1500     # 大结果落盘后保留在上下文里的预览长度

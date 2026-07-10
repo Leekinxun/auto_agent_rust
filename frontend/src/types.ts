@@ -333,6 +333,57 @@ export type HarnessRunTrace = {
   outcome: HarnessTraceOutcome;
 };
 
+export type AgentRunManifest = {
+  runId: string;
+  traceId: string;
+  userId: string;
+  sessionId?: string | null;
+  mode: string;
+  runKind: string;
+  modelId: string;
+  harnessSnapshotId: string;
+  startedAtMs: number;
+  finishedAtMs?: number | null;
+  status: string;
+  finishReason?: string | null;
+  error?: string | null;
+  stepCount: number;
+  lastStepIndex?: number | null;
+};
+
+export type AgentRunStep = {
+  runId: string;
+  stepIndex: number;
+  kind: string;
+  createdAtMs: number;
+  iteration: number;
+  tokenEstimateBefore: number;
+  tokenEstimateAfter: number;
+  messagesBefore: unknown[];
+  messagesAfter: unknown[];
+  payload: Record<string, unknown>;
+};
+
+export type AgentRunDetail = {
+  manifest: AgentRunManifest;
+  steps: AgentRunStep[];
+};
+
+export type AgentRunReplay = {
+  runId: string;
+  fromStepIndex: number;
+  manifest: AgentRunManifest;
+  steps: AgentRunStep[];
+  replayMode: string;
+};
+
+export type AgentRunTranscript = {
+  transcriptId: string;
+  path: string;
+  truncated: boolean;
+  contentJsonl: string;
+};
+
 export type HarnessDecisionStatus = "proposed" | "accepted" | "rejected";
 
 export type HarnessDecisionRecord = {

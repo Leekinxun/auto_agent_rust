@@ -4,6 +4,7 @@ pub mod frontend;
 pub mod harness;
 pub mod health;
 pub mod memory;
+pub mod runs;
 pub mod skills;
 pub mod tasks;
 pub mod worktrees;
@@ -18,6 +19,7 @@ pub fn agent_router() -> Router<SharedState> {
         .merge(files::router())
         .merge(harness::router())
         .merge(memory::router())
+        .merge(runs::router())
         .merge(skills::router())
         .merge(tasks::router())
         .merge(worktrees::router())

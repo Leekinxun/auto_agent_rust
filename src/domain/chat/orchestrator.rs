@@ -11,7 +11,9 @@ use tokio::sync::mpsc;
 
 use crate::config::model::AppConfig;
 use crate::domain::chat::compaction::{
-    auto_compact, estimate_tokens, microcompact, public_compaction_tool_schemas,
+    COMPRESS_CONTEXT_TOOL, CONTEXT_TRANSCRIPT_GET_TOOL, CompactionDecision, LEGACY_COMPRESS_TOOL,
+    auto_compact, build_compaction_payload, decide_compaction, public_compaction_tool_schemas,
+    read_context_transcript,
 };
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, BuiltinToolOverrides, ChatEvent, ChatMode,
@@ -38,6 +40,7 @@ use crate::domain::hitl::models::{
 use crate::domain::hitl::policy::{HitlPolicyDecision, evaluate_tool_hitl_policy};
 use crate::domain::hitl::service::{write_hitl_request, write_hitl_resolution};
 use crate::domain::memory::service::UserMemoryService;
+use crate::domain::run_capture::{AgentRunRecorder, AgentRunStepKind, build_run_step};
 use crate::domain::session::service::{SessionContext, SessionService};
 use crate::domain::skills::models::{SkillDocument, SkillScope};
 use crate::domain::skills::service::SkillService;
@@ -105,7 +108,12 @@ impl ChatOrchestrator {
         let prepared = self.prepare_request(request, &mode)?;
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
-        let mut messages = prepared.messages;
+        let started_at_ms = now_ms();
+        let trace_id = new_trace_id();
+        let run_recorder = self
+            .start_run_recorder(&prepared, &trace_id, started_at_ms, "sync", mode.as_str())
+            .await;
+        let mut messages = prepared.messages.clone();
         let mut mcp_tool_selection = McpToolSelection::default();
         let mut reply = String::new();
         let mut finish_reason = "stop".to_string();
@@ -118,19 +126,33 @@ impl ChatOrchestrator {
             .session
             .as_deref()
             .map(SessionContext::begin_agent_run);
-        let started_at_ms = now_ms();
-        let trace_id = new_trace_id();
+        let mut run_step_index = 0usize;
+        self.record_run_step(
+            run_recorder.as_ref(),
+            &mut run_step_index,
+            AgentRunStepKind::InitialState,
+            iterations,
+            Vec::new(),
+            messages.clone(),
+            json!({ "event": "initial_state" }),
+        )
+        .await;
 
         let run_result: Result<()> = async {
             for _ in 0..max_iterations {
                 iterations += 1;
-                microcompact(&mut messages);
-                if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
-                    messages = auto_compact(
-                        &self.repo_root,
-                        &self.config,
-                        &self.llm_client,
-                        messages.clone(),
+                let compaction_decision =
+                    decide_compaction(&messages, self.config.agent.auto_compact_token_threshold);
+                if compaction_decision.should_compact() {
+                    self.run_visible_context_compaction(
+                        &mut messages,
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        iterations,
+                        build_compaction_payload(&compaction_decision),
+                        keep_recent_pairs_from_decision(&compaction_decision),
+                        None,
+                        None,
                     )
                     .await?;
                 }
@@ -148,15 +170,23 @@ impl ChatOrchestrator {
                         &mcp_tool_selection,
                     )
                     .await;
-                let response = self
-                    .llm_client
-                    .chat(&self.build_llm_request_options(
-                        messages.clone(),
-                        Some(tools),
-                        false,
-                        &prepared.llm_overrides,
-                    )?)
-                    .await?;
+                let request_body = self.build_llm_request_options(
+                    messages.clone(),
+                    Some(tools),
+                    false,
+                    &prepared.llm_overrides,
+                )?;
+                self.record_run_step(
+                    run_recorder.as_ref(),
+                    &mut run_step_index,
+                    AgentRunStepKind::LlmRequest,
+                    iterations,
+                    messages.clone(),
+                    messages.clone(),
+                    json!({ "request": request_body }),
+                )
+                .await;
+                let response = self.llm_client.chat(&request_body).await?;
                 add_token_usage(&mut token_usage, response.usage.as_ref());
                 let Some(choice) = response.choices.into_iter().next() else {
                     finish_reason = "empty".to_string();
@@ -166,7 +196,22 @@ impl ChatOrchestrator {
                 let assistant = choice.message;
                 let tool_calls = assistant.tool_calls.clone();
                 let assistant_content = assistant.content.clone().unwrap_or_default();
+                let before_assistant = messages.clone();
                 messages.push(assistant.into_chat_message());
+                self.record_run_step(
+                    run_recorder.as_ref(),
+                    &mut run_step_index,
+                    AgentRunStepKind::LlmResponse,
+                    iterations,
+                    before_assistant,
+                    messages.clone(),
+                    json!({
+                        "finish_reason": finish_reason,
+                        "assistant_content": assistant_content,
+                        "tool_calls": tool_calls,
+                    }),
+                )
+                .await;
                 if tool_calls.is_empty() {
                     append_reply_segment(&mut reply, &assistant_content);
                     if self.apply_steering_interrupt(
@@ -186,6 +231,16 @@ impl ChatOrchestrator {
                 let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
+                    self.record_run_step(
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        AgentRunStepKind::ToolCall,
+                        iterations,
+                        messages.clone(),
+                        messages.clone(),
+                        json!({ "tool_call": tool_call }),
+                    )
+                    .await;
                     let result = self
                         .dispatch_public_tool(
                             tool_call,
@@ -202,16 +257,38 @@ impl ChatOrchestrator {
                             None,
                         )
                         .await;
-                    if tool_call.function.name == "compress" {
+                    if is_context_compress_tool(&tool_call.function.name) {
                         compress_requested = true;
                     }
+                    let raw_result = result.clone();
                     let context_result = self
                         .prepare_tool_result_for_context(tool_call, result)
                         .await;
+                    let before_tool_result = messages.clone();
                     messages.push(ChatMessage::tool(
                         tool_call.id.clone(),
-                        context_result.model_content,
+                        context_result.model_content.clone(),
                     ));
+                    self.record_run_step(
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        AgentRunStepKind::ToolResult,
+                        iterations,
+                        before_tool_result,
+                        messages.clone(),
+                        json!({
+                            "tool_name": tool_call.function.name,
+                            "tool_call_id": tool_call.id,
+                            "raw_result": raw_result,
+                            "context_result": {
+                                "model_content": context_result.model_content,
+                                "persisted_path": context_result.persisted_path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string()),
+                            },
+                        }),
+                    )
+                    .await;
 
                     if self.apply_steering_interrupt(
                         &mut messages,
@@ -229,11 +306,15 @@ impl ChatOrchestrator {
                     .await;
 
                 if compress_requested {
-                    messages = auto_compact(
-                        &self.repo_root,
-                        &self.config,
-                        &self.llm_client,
-                        messages.clone(),
+                    self.run_visible_context_compaction(
+                        &mut messages,
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        iterations,
+                        json!({ "reason": "model_requested_compress" }),
+                        None,
+                        Some("model_requested_compress"),
+                        None,
                     )
                     .await?;
                 }
@@ -280,6 +361,23 @@ impl ChatOrchestrator {
                 false,
                 final_reply_recovered,
             ))
+            .await;
+            self.record_run_step(
+                run_recorder.as_ref(),
+                &mut run_step_index,
+                AgentRunStepKind::Error,
+                iterations,
+                messages.clone(),
+                messages.clone(),
+                json!({ "error": format!("{error:#}") }),
+            )
+            .await;
+            self.finish_run_recorder(
+                run_recorder.as_ref(),
+                "error",
+                Some(finish_reason.clone()),
+                Some(format!("{error:#}")),
+            )
             .await;
             return Err(error);
         }
@@ -341,6 +439,28 @@ impl ChatOrchestrator {
             final_reply_recovered,
         ))
         .await;
+        self.record_run_step(
+            run_recorder.as_ref(),
+            &mut run_step_index,
+            AgentRunStepKind::Final,
+            iterations,
+            messages.clone(),
+            messages.clone(),
+            json!({
+                "reply": reply,
+                "finish_reason": finish_reason,
+                "output_files": output_files,
+                "skills_updated": skills_updated.len(),
+            }),
+        )
+        .await;
+        self.finish_run_recorder(
+            run_recorder.as_ref(),
+            "success",
+            Some(finish_reason.clone()),
+            None,
+        )
+        .await;
 
         Ok(ChatResult {
             reply,
@@ -361,7 +481,12 @@ impl ChatOrchestrator {
         let prepared = self.prepare_request(request, &mode)?;
         let max_iterations =
             resolve_max_iterations(&prepared.llm_overrides, self.config.agent.max_iterations);
-        let mut messages = prepared.messages;
+        let started_at_ms = now_ms();
+        let trace_id = new_trace_id();
+        let run_recorder = self
+            .start_run_recorder(&prepared, &trace_id, started_at_ms, "stream", mode.as_str())
+            .await;
+        let mut messages = prepared.messages.clone();
         let mut mcp_tool_selection = McpToolSelection::default();
         let mut full_reply = String::new();
         let mut rounds_without_todo = 0usize;
@@ -374,8 +499,17 @@ impl ChatOrchestrator {
             .session
             .as_deref()
             .map(SessionContext::begin_agent_run);
-        let started_at_ms = now_ms();
-        let trace_id = new_trace_id();
+        let mut run_step_index = 0usize;
+        self.record_run_step(
+            run_recorder.as_ref(),
+            &mut run_step_index,
+            AgentRunStepKind::InitialState,
+            iterations,
+            Vec::new(),
+            messages.clone(),
+            json!({ "event": "initial_state" }),
+        )
+        .await;
 
         let stream_result: Result<()> = async {
             for _ in 0..max_iterations {
@@ -384,13 +518,18 @@ impl ChatOrchestrator {
                     tracing::info!("stream receiver closed before next iteration");
                     return Ok(());
                 }
-                microcompact(&mut messages);
-                if estimate_tokens(&messages) > self.config.agent.auto_compact_token_threshold {
-                    messages = auto_compact(
-                        &self.repo_root,
-                        &self.config,
-                        &self.llm_client,
-                        messages.clone(),
+                let compaction_decision =
+                    decide_compaction(&messages, self.config.agent.auto_compact_token_threshold);
+                if compaction_decision.should_compact() {
+                    self.run_visible_context_compaction(
+                        &mut messages,
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        iterations,
+                        build_compaction_payload(&compaction_decision),
+                        keep_recent_pairs_from_decision(&compaction_decision),
+                        None,
+                        Some(&sender),
                     )
                     .await?;
                 }
@@ -414,6 +553,16 @@ impl ChatOrchestrator {
                     true,
                     &prepared.llm_overrides,
                 )?;
+                self.record_run_step(
+                    run_recorder.as_ref(),
+                    &mut run_step_index,
+                    AgentRunStepKind::LlmRequest,
+                    iterations,
+                    messages.clone(),
+                    messages.clone(),
+                    json!({ "request": request_body }),
+                )
+                .await;
                 let mut stream = self.llm_client.stream_chat(&request_body).await?;
                 let mut buffer = String::new();
                 let mut tool_accumulators: Vec<ToolCallAccumulator> = Vec::new();
@@ -478,14 +627,29 @@ impl ChatOrchestrator {
                     .map(ToolCallAccumulator::into_tool_call)
                     .collect::<Vec<_>>();
 
+                let before_assistant = messages.clone();
                 messages.push(ChatMessage::assistant(
                     if round_text.is_empty() {
                         None
                     } else {
-                        Some(round_text)
+                        Some(round_text.clone())
                     },
                     tool_calls.clone(),
                 ));
+                self.record_run_step(
+                    run_recorder.as_ref(),
+                    &mut run_step_index,
+                    AgentRunStepKind::LlmResponse,
+                    iterations,
+                    before_assistant,
+                    messages.clone(),
+                    json!({
+                        "finish_reason": finish_reason,
+                        "assistant_content": round_text,
+                        "tool_calls": tool_calls,
+                    }),
+                )
+                .await;
 
                 if tool_calls.is_empty() {
                     if full_reply.trim().is_empty() {
@@ -603,6 +767,16 @@ impl ChatOrchestrator {
                 let turn_tool_message_start = messages.len();
                 for (index, tool_call) in tool_calls.iter().enumerate() {
                     tool_names.push(tool_call.function.name.clone());
+                    self.record_run_step(
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        AgentRunStepKind::ToolCall,
+                        iterations,
+                        messages.clone(),
+                        messages.clone(),
+                        json!({ "tool_call": tool_call }),
+                    )
+                    .await;
                     if !try_send_stream_event(
                         &sender,
                         ChatEvent::ToolUse {
@@ -630,7 +804,7 @@ impl ChatOrchestrator {
                             Some(&sender),
                         )
                         .await;
-                    if tool_call.function.name == "compress" {
+                    if is_context_compress_tool(&tool_call.function.name) {
                         compress_requested = true;
                     }
                     let preview = truncate_for_preview(&result, 2_000);
@@ -638,7 +812,7 @@ impl ChatOrchestrator {
                         &sender,
                         ChatEvent::ToolResult {
                             tool: tool_call.function.name.clone(),
-                            output: preview,
+                            output: preview.clone(),
                         },
                     )
                     .await
@@ -648,10 +822,31 @@ impl ChatOrchestrator {
                     let context_result = self
                         .prepare_tool_result_for_context(tool_call, result)
                         .await;
+                    let before_tool_result = messages.clone();
                     messages.push(ChatMessage::tool(
                         tool_call.id.clone(),
-                        context_result.model_content,
+                        context_result.model_content.clone(),
                     ));
+                    self.record_run_step(
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        AgentRunStepKind::ToolResult,
+                        iterations,
+                        before_tool_result,
+                        messages.clone(),
+                        json!({
+                            "tool_name": tool_call.function.name,
+                            "tool_call_id": tool_call.id,
+                            "raw_result_preview": preview,
+                            "context_result": {
+                                "model_content": context_result.model_content,
+                                "persisted_path": context_result.persisted_path
+                                    .as_ref()
+                                    .map(|path| path.display().to_string()),
+                            },
+                        }),
+                    )
+                    .await;
 
                     if self.apply_steering_interrupt(
                         &mut messages,
@@ -669,11 +864,15 @@ impl ChatOrchestrator {
                     .await;
 
                 if compress_requested {
-                    messages = auto_compact(
-                        &self.repo_root,
-                        &self.config,
-                        &self.llm_client,
-                        messages.clone(),
+                    self.run_visible_context_compaction(
+                        &mut messages,
+                        run_recorder.as_ref(),
+                        &mut run_step_index,
+                        iterations,
+                        json!({ "reason": "model_requested_compress" }),
+                        None,
+                        Some("model_requested_compress"),
+                        Some(&sender),
                     )
                     .await?;
                 }
@@ -786,6 +985,26 @@ impl ChatOrchestrator {
                 ))
                 .await;
             }
+            self.record_run_step(
+                run_recorder.as_ref(),
+                &mut run_step_index,
+                AgentRunStepKind::Final,
+                iterations,
+                messages.clone(),
+                messages.clone(),
+                json!({
+                    "reply": full_reply,
+                    "finish_reason": final_finish_reason,
+                }),
+            )
+            .await;
+            self.finish_run_recorder(
+                run_recorder.as_ref(),
+                "success",
+                Some(final_finish_reason.clone()),
+                None,
+            )
+            .await;
             Ok(())
         }
         .await;
@@ -806,7 +1025,7 @@ impl ChatOrchestrator {
                 "stream",
                 mode.as_str(),
                 "error".to_string(),
-                final_finish_reason,
+                final_finish_reason.clone(),
                 Some(format!("{error:#}")),
                 iterations,
                 &tool_names,
@@ -817,6 +1036,23 @@ impl ChatOrchestrator {
                 false,
                 final_reply_recovered,
             ))
+            .await;
+            self.record_run_step(
+                run_recorder.as_ref(),
+                &mut run_step_index,
+                AgentRunStepKind::Error,
+                iterations,
+                messages.clone(),
+                messages.clone(),
+                json!({ "error": format!("{error:#}") }),
+            )
+            .await;
+            self.finish_run_recorder(
+                run_recorder.as_ref(),
+                "error",
+                Some(final_finish_reason.clone()),
+                Some(format!("{error:#}")),
+            )
             .await;
             return Err(error);
         }
@@ -1000,6 +1236,201 @@ Skills available (call load_skill to use):
             .unwrap_or(&self.config.agent.model_id);
         let context_window = self.llm_client.model_context_window(model).await;
         TokenUsageReport::from_usage(usage, context_window)
+    }
+
+    async fn start_run_recorder(
+        &self,
+        prepared: &PreparedRequest,
+        trace_id: &str,
+        started_at_ms: u128,
+        run_kind: &str,
+        mode: &str,
+    ) -> Option<AgentRunRecorder> {
+        let user_id = prepared
+            .user_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let model_id = prepared
+            .llm_overrides
+            .model_id
+            .clone()
+            .unwrap_or_else(|| self.config.agent.model_id.clone());
+        match AgentRunRecorder::start(
+            &self.repo_root,
+            user_id,
+            trace_id,
+            prepared
+                .session
+                .as_ref()
+                .map(|session| session.session_id.clone()),
+            mode,
+            run_kind,
+            &model_id,
+            &prepared.trace_snapshot_id,
+            started_at_ms,
+        )
+        .await
+        {
+            Ok(recorder) => Some(recorder),
+            Err(error) => {
+                tracing::warn!(?error, user_id, "failed to start agent run recorder");
+                None
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn record_run_step(
+        &self,
+        recorder: Option<&AgentRunRecorder>,
+        next_step_index: &mut usize,
+        kind: AgentRunStepKind,
+        iteration: usize,
+        messages_before: Vec<ChatMessage>,
+        messages_after: Vec<ChatMessage>,
+        payload: serde_json::Value,
+    ) {
+        let Some(recorder) = recorder else {
+            return;
+        };
+        let step_index = *next_step_index;
+        *next_step_index = next_step_index.saturating_add(1);
+        let step = build_run_step(
+            recorder.run_id(),
+            step_index,
+            kind,
+            iteration,
+            messages_before,
+            messages_after,
+            payload,
+        );
+        if let Err(error) = recorder.record_step(step).await {
+            tracing::warn!(
+                ?error,
+                run_id = recorder.run_id(),
+                "failed to record agent run step"
+            );
+        }
+    }
+
+    async fn finish_run_recorder(
+        &self,
+        recorder: Option<&AgentRunRecorder>,
+        status: &str,
+        finish_reason: Option<String>,
+        error: Option<String>,
+    ) {
+        let Some(recorder) = recorder else {
+            return;
+        };
+        if let Err(write_error) = recorder.finish(status, finish_reason, error).await {
+            tracing::warn!(
+                ?write_error,
+                run_id = recorder.run_id(),
+                "failed to finish agent run recorder"
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_visible_context_compaction(
+        &self,
+        messages: &mut Vec<ChatMessage>,
+        recorder: Option<&AgentRunRecorder>,
+        next_step_index: &mut usize,
+        iteration: usize,
+        payload: serde_json::Value,
+        keep_recent_qa_pairs: Option<usize>,
+        reason: Option<&str>,
+        sender: Option<&mpsc::Sender<ChatEvent>>,
+    ) -> Result<()> {
+        let tool_call = synthetic_tool_call(
+            COMPRESS_CONTEXT_TOOL,
+            json!({
+                "reason": reason.unwrap_or("auto_policy"),
+                "payload": payload,
+            }),
+        );
+        self.record_run_step(
+            recorder,
+            next_step_index,
+            AgentRunStepKind::ToolCall,
+            iteration,
+            messages.clone(),
+            messages.clone(),
+            json!({ "tool_call": tool_call, "synthetic": true }),
+        )
+        .await;
+        if let Some(sender) = sender
+            && !try_send_stream_event(
+                sender,
+                ChatEvent::ToolUse {
+                    name: tool_call.function.name.clone(),
+                    arguments: tool_call.function.arguments.clone(),
+                },
+            )
+            .await
+        {
+            return Ok(());
+        }
+
+        let before = messages.clone();
+        let outcome = auto_compact(
+            &self.repo_root,
+            &self.config,
+            &self.llm_client,
+            messages.clone(),
+            keep_recent_qa_pairs,
+        )
+        .await?;
+        let tool_result = serde_json::to_string_pretty(&json!({
+            "status": "compressed",
+            "transcript_id": outcome.transcript_id,
+            "transcript_path": outcome.transcript_path.display().to_string(),
+            "compacted_message_count": outcome.compacted_message_count,
+            "kept_message_count": outcome.kept_message_count,
+            "summary": outcome.summary,
+        }))?;
+        *messages = outcome.messages;
+        if let Some(sender) = sender
+            && !try_send_stream_event(
+                sender,
+                ChatEvent::ToolResult {
+                    tool: COMPRESS_CONTEXT_TOOL.to_string(),
+                    output: truncate_for_preview(&tool_result, 2_000),
+                },
+            )
+            .await
+        {
+            return Ok(());
+        }
+        self.record_run_step(
+            recorder,
+            next_step_index,
+            AgentRunStepKind::ToolResult,
+            iteration,
+            before.clone(),
+            messages.clone(),
+            json!({
+                "tool_name": COMPRESS_CONTEXT_TOOL,
+                "tool_call_id": tool_call.id,
+                "synthetic": true,
+                "raw_result": tool_result,
+            }),
+        )
+        .await;
+        self.record_run_step(
+            recorder,
+            next_step_index,
+            AgentRunStepKind::Compaction,
+            iteration,
+            before,
+            messages.clone(),
+            payload,
+        )
+        .await;
+        Ok(())
     }
 
     async fn load_public_tools_with_overrides(
@@ -1239,7 +1670,7 @@ Skills available (call load_skill to use):
             return self.read_file_via_mcp(&arguments, mcp_overrides).await;
         }
 
-        if tool_name == "compress" {
+        if is_context_compress_tool(tool_name) {
             return "Compressing...".to_string();
         }
 
@@ -1324,6 +1755,9 @@ Skills available (call load_skill to use):
             })(),
             SEARCH_LAZY_MCP_TOOLS_TOOL => {
                 self.search_lazy_mcp_tools(&arguments, mcp_overrides).await
+            }
+            CONTEXT_TRANSCRIPT_GET_TOOL => {
+                read_context_transcript(&self.repo_root, &arguments).await
             }
             ACTIVATE_LAZY_MCP_TOOLS_TOOL => {
                 self.activate_lazy_mcp_tools(&arguments, mcp_overrides, mcp_tool_selection)
@@ -2218,6 +2652,28 @@ fn resolve_max_iterations(
     overrides.max_iterations.unwrap_or(default_max_iterations)
 }
 
+fn keep_recent_pairs_from_decision(decision: &CompactionDecision) -> Option<usize> {
+    match decision {
+        CompactionDecision::KeepRecentQa { keep_pairs, .. } => Some(*keep_pairs),
+        CompactionDecision::Skip { .. } | CompactionDecision::CompactAll { .. } => None,
+    }
+}
+
+fn is_context_compress_tool(tool_name: &str) -> bool {
+    matches!(tool_name, COMPRESS_CONTEXT_TOOL | LEGACY_COMPRESS_TOOL)
+}
+
+fn synthetic_tool_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: format!("{name}-{}", now_ms()),
+        kind: "function".to_string(),
+        function: crate::infra::llm::types::FunctionCall {
+            name: name.to_string(),
+            arguments: serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string()),
+        },
+    }
+}
+
 fn add_token_usage(total: &mut TokenUsage, usage: Option<&TokenUsage>) {
     let Some(usage) = usage else {
         return;
@@ -2588,6 +3044,8 @@ mod tests {
             "check_background",
             "claim_task",
             "compress",
+            "compress_context",
+            "context_transcript_get",
             "edit_file",
             "list_teammates",
             "load_skill",
