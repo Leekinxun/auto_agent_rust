@@ -10,10 +10,10 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 use crate::config::model::AppConfig;
+use crate::domain::chat::builtin_tools::builtin_tool_schemas;
 use crate::domain::chat::compaction::{
     COMPRESS_CONTEXT_TOOL, CONTEXT_TRANSCRIPT_GET_TOOL, CompactionDecision, LEGACY_COMPRESS_TOOL,
-    auto_compact, build_compaction_payload, decide_compaction, public_compaction_tool_schemas,
-    read_context_transcript,
+    auto_compact, build_compaction_payload, decide_compaction, read_context_transcript,
 };
 use crate::domain::chat::models::{
     AgentPromptOverrides, AgentPromptSettingsPreview, BuiltinToolOverrides, ChatEvent, ChatMode,
@@ -44,11 +44,9 @@ use crate::domain::run_capture::{AgentRunRecorder, AgentRunStepKind, build_run_s
 use crate::domain::session::service::{SessionContext, SessionService};
 use crate::domain::skills::models::{SkillDocument, SkillScope};
 use crate::domain::skills::service::SkillService;
-use crate::domain::tasks::service::{TaskService, public_task_tool_schemas};
-use crate::domain::worktree::service::{WorktreeService, public_worktree_tool_schemas};
-use crate::infra::fs::tool_ops::{
-    dispatch_public_file_tool, public_file_tool_schemas, safe_workspace_path,
-};
+use crate::domain::tasks::service::TaskService;
+use crate::domain::worktree::service::WorktreeService;
+use crate::infra::fs::tool_ops::{dispatch_public_file_tool, safe_workspace_path};
 use crate::infra::llm::client::LlmClient;
 use crate::infra::llm::types::{
     ChatCompletionRequest, ChatMessage, StreamChunk, StreamOptions, TokenUsage, ToolCall,
@@ -2420,42 +2418,7 @@ fn static_public_tool_schemas(
     include_session_tools: bool,
     builtin_tool_overrides: &BuiltinToolOverrides,
 ) -> Vec<serde_json::Value> {
-    let mut tools = public_file_tool_schemas();
-    tools.extend(public_compaction_tool_schemas());
-    tools.extend(public_task_tool_schemas());
-    tools.extend(public_worktree_tool_schemas());
-    tools.push(json!({
-        "type": "function",
-        "function": {
-            "name": "task",
-            "description": "Spawn a subagent for isolated exploration or work. Returns a summary.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "prompt": { "type": "string" },
-                    "agent_type": { "type": "string", "enum": ["Explore", "general-purpose"] }
-                },
-                "required": ["prompt"]
-            }
-        }
-    }));
-    if include_session_tools {
-        tools.extend(SessionService::session_tool_schemas());
-    }
-    tools.push(json!({
-        "type": "function",
-        "function": {
-            "name": "load_skill",
-            "description": "Load the full content of a named skill when the task requires it.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string", "description": "The skill name to load." }
-                },
-                "required": ["name"]
-            }
-        }
-    }));
+    let tools = builtin_tool_schemas(include_session_tools);
     filter_builtin_tool_schemas(tools, builtin_tool_overrides)
 }
 

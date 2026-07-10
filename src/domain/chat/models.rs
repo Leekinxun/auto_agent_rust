@@ -2,6 +2,9 @@ use serde::Serialize;
 
 use crate::domain::hitl::policy::{HitlDefaultAction, HitlPolicyRule};
 
+pub use crate::domain::chat::builtin_tools::{
+    builtin_tool_names, is_builtin_tool, normalize_builtin_tool_list, normalize_builtin_tool_name,
+};
 use crate::domain::skills::models::{SkillDocument, SkillScope};
 use crate::infra::llm::types::TokenUsage;
 use crate::infra::mcp::client::McpServerPreview;
@@ -140,68 +143,6 @@ impl BuiltinToolOverrides {
                 .iter()
                 .any(|item| normalize_builtin_tool_name(item) == normalized)
     }
-}
-
-pub const BUILTIN_TOOL_NAMES: &[&str] = &[
-    "TodoWrite",
-    "background_run",
-    "broadcast",
-    "check_background",
-    "claim_task",
-    "compress",
-    "compress_context",
-    "context_transcript_get",
-    "edit_file",
-    "idle",
-    "list_teammates",
-    "load_skill",
-    "plan_approval",
-    "read_file",
-    "read_inbox",
-    "send_message",
-    "shutdown_request",
-    "spawn_teammate",
-    "task",
-    "task_bind_worktree",
-    "task_create",
-    "task_get",
-    "task_list",
-    "task_update",
-    "worktree_create",
-    "worktree_events",
-    "worktree_keep",
-    "worktree_list",
-    "worktree_remove",
-    "worktree_run",
-    "worktree_status",
-    "write_file",
-];
-
-pub fn is_builtin_tool(name: &str) -> bool {
-    let normalized = normalize_builtin_tool_name(name);
-    BUILTIN_TOOL_NAMES.iter().any(|item| *item == normalized)
-}
-
-pub fn is_builtin_file_tool(name: &str) -> bool {
-    matches!(
-        normalize_builtin_tool_name(name),
-        "read_file" | "write_file" | "edit_file"
-    )
-}
-
-pub fn normalize_builtin_tool_list(values: Vec<String>) -> Vec<String> {
-    let mut seen = std::collections::HashSet::new();
-    values
-        .into_iter()
-        .map(|item| normalize_builtin_tool_name(&item).to_string())
-        .filter(|item| !item.is_empty())
-        .filter(|item| is_builtin_tool(item))
-        .filter(|item| seen.insert(item.clone()))
-        .collect()
-}
-
-fn normalize_builtin_tool_name(name: &str) -> &str {
-    name.trim()
 }
 
 #[derive(Debug, Clone)]

@@ -5,7 +5,7 @@ use anyhow::{Context, Result, bail, ensure};
 
 use crate::config::model::AppConfig;
 use crate::domain::chat::models::{
-    BUILTIN_TOOL_NAMES, is_builtin_tool, normalize_builtin_tool_list,
+    builtin_tool_names, is_builtin_tool, normalize_builtin_tool_list,
 };
 use crate::domain::harness::{
     MEMORY_MAINTENANCE_SYSTEM_PATH, MEMORY_MAINTENANCE_USER_TEMPLATE_PATH,
@@ -241,7 +241,7 @@ fn parse_builtin_tool_csv(key: &str, raw: &str) -> Result<Vec<String>> {
         invalid.is_empty(),
         "{key} contains unsupported built-in tool names: {}. Supported tools: {}",
         invalid.join(", "),
-        BUILTIN_TOOL_NAMES.join(", ")
+        builtin_tool_names().join(", ")
     );
     let normalized = normalize_builtin_tool_list(items.clone());
     Ok(normalized)

@@ -15,10 +15,11 @@ use tokio_stream::wrappers::ReceiverStream;
 use crate::api::dto::chat::{AgentResponse, MemoryAgentResponse, SteeringResponse};
 use crate::api::errors::{ApiError, ApiResult};
 use crate::app_state::SharedState;
+use crate::domain::chat::builtin_tools::builtin_tool_previews;
 use crate::domain::chat::models::{
-    AgentPromptOverrides, BUILTIN_TOOL_NAMES, BuiltinToolOverrides, ChatEvent, ChatMode,
-    ChatRequest, HistoryEntry, HitlOverrides, LlmOverrides, McpOverrides, SkillPermissions,
-    SteeringSubmission, UploadedFile, is_builtin_tool, normalize_builtin_tool_list,
+    AgentPromptOverrides, BuiltinToolOverrides, ChatEvent, ChatMode, ChatRequest, HistoryEntry,
+    HitlOverrides, LlmOverrides, McpOverrides, SkillPermissions, SteeringSubmission, UploadedFile,
+    builtin_tool_names, is_builtin_tool, normalize_builtin_tool_list,
 };
 use crate::domain::hitl::models::HitlDecisionResolution;
 use crate::domain::hitl::policy::HitlDefaultAction;
@@ -57,6 +58,7 @@ pub fn router() -> Router<SharedState> {
         )
         .route("/settings/prompts", get(agent_prompt_settings))
         .route("/settings/mcp", get(agent_mcp_settings))
+        .route("/settings/builtin-tools", get(agent_builtin_tool_settings))
         .route(
             "/settings/shared",
             get(get_shared_frontend_settings).post(save_shared_frontend_settings_route),
@@ -142,6 +144,12 @@ async fn agent_mcp_settings(
             .preview_mcp_settings(overrides)
             .await?,
     ))
+}
+
+async fn agent_builtin_tool_settings() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "tools": builtin_tool_previews(),
+    }))
 }
 
 async fn get_shared_frontend_settings(
@@ -762,7 +770,7 @@ fn parse_builtin_tool_list(raw: &str, label: &str) -> ApiResult<Vec<String>> {
         return Err(ApiError::bad_request(format!(
             "{label} 包含不支持的内置工具: {}。支持的工具: {}",
             invalid.join(", "),
-            BUILTIN_TOOL_NAMES.join(", ")
+            builtin_tool_names().join(", ")
         )));
     }
     Ok(normalize_builtin_tool_list(parsed))
